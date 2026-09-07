@@ -9,6 +9,14 @@ import com.google.firebase.database.DatabaseReference
 import com.google.firebase.database.FirebaseDatabase
 import com.google.firebase.database.ServerValue
 import com.google.firebase.database.ValueEventListener
+import pl.wideocall.app.notifications.PushTokenRegistry
+
+data class ContactPresence(
+    val online: Boolean = false,
+    val busy: Boolean = false,
+    val pushReady: Boolean = false,
+    val lastSeen: Long = 0L,
+)
 
 class SignalingClient(
     private val listener: Listener,
@@ -17,6 +25,7 @@ class SignalingClient(
         fun onConnected()
         fun onDisconnected(reason: String)
         fun onMessage(message: SignalMessage)
+        fun onPresenceChanged(userId: String, presence: ContactPresence)
     }
 
     private var auth: FirebaseAuth? = null
@@ -28,6 +37,7 @@ class SignalingClient(
     private var connectionListener: ValueEventListener? = null
     private var signalsRef: DatabaseReference? = null
     private var signalsListener: ChildEventListener? = null
+    private val contactListeners = mutableMapOf<String, Pair<DatabaseReference, ValueEventListener>>()
     private var ready = false
     private var intentionallyClosed = false
     private var connectionGeneration = 0
@@ -88,7 +98,13 @@ class SignalingClient(
             currentDatabase.reference.child(USERS_PATH).child(recipientId).get()
                 .addOnSuccessListener { snapshot ->
                     val online = snapshot.child("online").getValue(Boolean::class.java) == true
-                    if (online) {
+                    val pushReady = snapshot.child("pushReady").getValue(Boolean::class.java) == true
+                    val busy = snapshot.child("busy").getValue(Boolean::class.java) == true
+                    if (busy) {
+                        listener.onMessage(
+                            SignalMessage(type = "busy", from = recipientId, to = currentUserId, callId = message.callId)
+                        )
+                    } else if (online || pushReady) {
                         enqueue(message, currentUid)
                     } else {
                         listener.onMessage(
@@ -108,6 +124,43 @@ class SignalingClient(
         return true
     }
 
+    fun observeContacts(ids: Collection<String>) {
+        val currentDatabase = database ?: return
+        val wanted = ids.toSet()
+        contactListeners.keys.filterNot(wanted::contains).forEach { id ->
+            contactListeners.remove(id)?.let { (reference, observer) -> reference.removeEventListener(observer) }
+        }
+        wanted.filterNot(contactListeners::containsKey).forEach { id ->
+            val reference = currentDatabase.reference.child(USERS_PATH).child(id)
+            val observer = object : ValueEventListener {
+                override fun onDataChange(snapshot: DataSnapshot) {
+                    listener.onPresenceChanged(
+                        id,
+                        ContactPresence(
+                            online = snapshot.child("online").getValue(Boolean::class.java) == true,
+                            busy = snapshot.child("busy").getValue(Boolean::class.java) == true,
+                            pushReady = snapshot.child("pushReady").getValue(Boolean::class.java) == true,
+                            lastSeen = snapshot.child("lastSeen").getValue(Long::class.java) ?: 0L,
+                        ),
+                    )
+                }
+
+                override fun onCancelled(error: DatabaseError) = Unit
+            }
+            reference.addValueEventListener(observer)
+            contactListeners[id] = reference to observer
+        }
+    }
+
+    fun setBusy(busy: Boolean) {
+        presenceRef?.updateChildren(
+            mapOf(
+                "busy" to busy,
+                "lastSeen" to ServerValue.TIMESTAMP,
+            )
+        )
+    }
+
     fun disconnect() {
         connectionGeneration += 1
         intentionallyClosed = true
@@ -115,6 +168,8 @@ class SignalingClient(
 
         connectionListener?.let { current -> connectionRef?.removeEventListener(current) }
         signalsListener?.let { current -> signalsRef?.removeEventListener(current) }
+        contactListeners.values.forEach { (reference, observer) -> reference.removeEventListener(observer) }
+        contactListeners.clear()
         presenceRef?.updateChildren(offlinePresence())
 
         connectionListener = null
@@ -182,6 +237,7 @@ class SignalingClient(
                         if (generation != connectionGeneration || intentionallyClosed) return@addOnSuccessListener
                         attachSignalListener(userId, generation)
                         ready = true
+                        PushTokenRegistry.refresh(userId, uid, currentDatabase)
                         listener.onConnected()
                     }
                     .addOnFailureListener { failure ->
@@ -202,7 +258,8 @@ class SignalingClient(
                 if (generation != connectionGeneration || intentionallyClosed) return
                 val message = snapshot.toSignalMessage()
                 val createdAt = snapshot.child("createdAt").getValue(Long::class.java) ?: 0L
-                val fresh = createdAt == 0L || System.currentTimeMillis() - createdAt <= MESSAGE_MAX_AGE_MS
+                val maxAge = if (message?.type == "offer") OFFER_MAX_AGE_MS else MESSAGE_MAX_AGE_MS
+                val fresh = createdAt == 0L || System.currentTimeMillis() - createdAt <= maxAge
                 if (message != null && message.to == userId && fresh) listener.onMessage(message)
                 snapshot.ref.removeValue()
             }
@@ -265,11 +322,14 @@ class SignalingClient(
     private fun onlinePresence(uid: String): Map<String, Any> = mapOf(
         "authUid" to uid,
         "online" to true,
+        "busy" to false,
+        "pushReady" to false,
         "lastSeen" to ServerValue.TIMESTAMP,
     )
 
     private fun offlinePresence(): Map<String, Any> = mapOf(
         "online" to false,
+        "busy" to false,
         "lastSeen" to ServerValue.TIMESTAMP,
     )
 
@@ -277,5 +337,6 @@ class SignalingClient(
         private const val USERS_PATH = "users"
         private const val SIGNALS_PATH = "signals"
         private const val MESSAGE_MAX_AGE_MS = 2 * 60 * 1000L
+        private const val OFFER_MAX_AGE_MS = 45_000L
     }
 }

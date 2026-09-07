@@ -10,3 +10,7 @@
 app/build
 signaling-server/node_modules
 signaling-server/.env
+.npm-cache
+.firebase-cli
+functions/node_modules
+functions/.firebase

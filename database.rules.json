@@ -6,7 +6,14 @@
       "$userId": {
         ".read": "auth != null",
         ".write": "auth != null && newData.exists() && newData.child('authUid').val() === auth.uid && (!data.exists() || data.child('authUid').val() === auth.uid)",
-        ".validate": "$userId.matches(/^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/) && newData.hasChildren(['authUid', 'online', 'lastSeen']) && newData.child('authUid').isString() && newData.child('online').isBoolean() && newData.child('lastSeen').isNumber()"
+        ".validate": "$userId.matches(/^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/) && newData.hasChildren(['authUid', 'online', 'busy', 'pushReady', 'lastSeen']) && newData.child('authUid').isString() && newData.child('online').isBoolean() && newData.child('busy').isBoolean() && newData.child('pushReady').isBoolean() && newData.child('lastSeen').isNumber()"
+      }
+    },
+    "devices": {
+      "$userId": {
+        ".read": false,
+        ".write": "auth != null && root.child('users').child($userId).child('authUid').val() === auth.uid && newData.exists() && newData.child('authUid').val() === auth.uid",
+        ".validate": "$userId.matches(/^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/) && newData.hasChildren(['authUid', 'token', 'updatedAt']) && newData.child('authUid').isString() && newData.child('token').isString() && newData.child('token').val().length > 20 && newData.child('updatedAt').isNumber()"
       }
     },
     "signals": {

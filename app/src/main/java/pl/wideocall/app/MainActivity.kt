@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.RingtoneManager
@@ -27,6 +28,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -35,6 +38,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Call
@@ -45,6 +49,9 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.automirrored.filled.Chat
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Videocam
@@ -78,6 +85,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -89,23 +97,48 @@ import pl.wideocall.app.call.AppUiState
 import pl.wideocall.app.call.CallPhase
 import pl.wideocall.app.call.CallViewModel
 import pl.wideocall.app.data.Contact
+import pl.wideocall.app.notifications.CallNotifications
+import pl.wideocall.app.signaling.ContactPresence
 import pl.wideocall.app.ui.theme.WideocallTheme
+import kotlinx.coroutines.flow.MutableStateFlow
+
+private data class NotificationAction(val action: String, val callId: String)
 
 class MainActivity : ComponentActivity() {
     private val viewModel: CallViewModel by viewModels()
+    private val notificationAction = MutableStateFlow<NotificationAction?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        captureNotificationAction(intent)
         setContent {
             WideocallTheme {
-                PermissionGate(viewModel)
+                val action by notificationAction.collectAsState()
+                PermissionGate(viewModel, action) { notificationAction.value = null }
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        captureNotificationAction(intent)
+    }
+
+    private fun captureNotificationAction(intent: Intent?) {
+        val action = intent?.action ?: return
+        if (action !in setOf(CallNotifications.ACTION_ANSWER, CallNotifications.ACTION_DECLINE, CallNotifications.ACTION_HANG_UP)) return
+        val callId = intent.getStringExtra(CallNotifications.EXTRA_CALL_ID) ?: return
+        notificationAction.value = NotificationAction(action, callId)
     }
 }
 
 @Composable
-private fun PermissionGate(viewModel: CallViewModel) {
+private fun PermissionGate(
+    viewModel: CallViewModel,
+    notificationAction: NotificationAction?,
+    consumeNotificationAction: () -> Unit,
+) {
     val context = LocalContext.current
     var permissionsGranted by remember { mutableStateOf(hasMediaPermissions(context)) }
     val launcher = rememberLauncherForActivityResult(
@@ -116,12 +149,30 @@ private fun PermissionGate(viewModel: CallViewModel) {
     }
 
     LaunchedEffect(Unit) {
-        if (!permissionsGranted) {
+        if (!permissionsGranted || !hasNotificationPermission(context)) {
             launcher.launch(requiredPermissions())
         }
     }
 
     val state by viewModel.state.collectAsState()
+    LaunchedEffect(notificationAction, state.phase, state.callId, permissionsGranted) {
+        val action = notificationAction ?: return@LaunchedEffect
+        if (action.callId != state.callId) return@LaunchedEffect
+        when (action.action) {
+            CallNotifications.ACTION_ANSWER -> if (state.phase == CallPhase.INCOMING && permissionsGranted) {
+                viewModel.acceptIncomingCall()
+                consumeNotificationAction()
+            }
+            CallNotifications.ACTION_DECLINE -> if (state.phase == CallPhase.INCOMING) {
+                viewModel.rejectIncomingCall()
+                consumeNotificationAction()
+            }
+            CallNotifications.ACTION_HANG_UP -> if (state.phase in setOf(CallPhase.OUTGOING, CallPhase.CONNECTING_CALL, CallPhase.IN_CALL)) {
+                viewModel.hangUp()
+                consumeNotificationAction()
+            }
+        }
+    }
     when (state.phase) {
         CallPhase.INCOMING -> IncomingCallScreen(state, viewModel, permissionsGranted) {
             launcher.launch(requiredPermissions())
@@ -167,7 +218,7 @@ private fun HomeScreen(
                 }
                 Column(Modifier.padding(start = 12.dp).weight(1f)) {
                     Text("Wideocall", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                    Text("Tylko rozmowy wideo", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Wideorozmowy i znikające wiadomości", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 IconButton(onClick = { showSettings = true }) {
                     Icon(Icons.Default.Settings, "Ustawienia")
@@ -214,7 +265,9 @@ private fun HomeScreen(
                 items(state.contacts, key = { it.id }) { contact ->
                     ContactCard(
                         contact = contact,
-                        callEnabled = state.phase == CallPhase.READY && permissionsGranted,
+                        presence = state.contactPresence[contact.id],
+                        callEnabled = state.phase == CallPhase.READY && permissionsGranted &&
+                            state.contactPresence[contact.id]?.let { !it.busy && (it.online || it.pushReady) } == true,
                         onCall = { viewModel.call(contact) },
                         onDelete = { viewModel.removeContact(contact.id) },
                     )
@@ -315,7 +368,27 @@ private fun EmptyContactsCard(onAdd: () -> Unit) {
 }
 
 @Composable
-private fun ContactCard(contact: Contact, callEnabled: Boolean, onCall: () -> Unit, onDelete: () -> Unit) {
+private fun ContactCard(
+    contact: Contact,
+    presence: ContactPresence?,
+    callEnabled: Boolean,
+    onCall: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    val presenceColor = when {
+        presence?.busy == true -> Color(0xFFFF6B6B)
+        presence?.online == true -> Color(0xFF3DDC97)
+        presence?.pushReady == true -> Color(0xFFFFC857)
+        else -> MaterialTheme.colorScheme.outline
+    }
+    val presenceText = when {
+        presence?.busy == true -> "Zajęty"
+        presence?.online == true -> "Dostępny"
+        presence?.pushReady == true -> "Dostępny przez powiadomienie"
+        presence == null -> "Sprawdzanie dostępności…"
+        presence.lastSeen > 0L -> "Offline • ostatnio ${relativeLastSeen(presence.lastSeen)}"
+        else -> "Offline"
+    }
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
         Row(
             modifier = Modifier.fillMaxWidth().padding(14.dp),
@@ -330,6 +403,15 @@ private fun ContactCard(contact: Contact, callEnabled: Boolean, onCall: () -> Un
             Column(Modifier.padding(start = 12.dp).weight(1f)) {
                 Text(contact.name, fontWeight = FontWeight.SemiBold)
                 Text(contact.id, style = MaterialTheme.typography.bodySmall, letterSpacing = 1.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.size(7.dp).background(presenceColor, CircleShape))
+                    Text(
+                        presenceText,
+                        modifier = Modifier.padding(start = 6.dp),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
             IconButton(onClick = onDelete) { Icon(Icons.Default.DeleteOutline, "Usuń kontakt", tint = MaterialTheme.colorScheme.onSurfaceVariant) }
             IconButton(onClick = onCall, enabled = callEnabled) {
@@ -413,6 +495,16 @@ private fun VideoCallScreen(state: AppUiState, viewModel: CallViewModel) {
             Text(state.remoteName ?: state.remoteId.orEmpty(), color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
             Text(state.status, color = Color.White.copy(alpha = .7f))
         }
+        if (state.chatVisible) {
+            EphemeralChatPanel(
+                state = state,
+                onClose = viewModel::toggleChat,
+                onSend = viewModel::sendChatMessage,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(start = 12.dp, end = 12.dp, bottom = 128.dp),
+            )
+        }
         Row(
             modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 44.dp),
             horizontalArrangement = Arrangement.spacedBy(24.dp),
@@ -437,6 +529,93 @@ private fun VideoCallScreen(state: AppUiState, viewModel: CallViewModel) {
                 description = "Zmień kamerę",
                 onClick = viewModel::switchCamera,
             )
+            RoundIconButton(
+                background = if (state.chatVisible) Color(0xFF3C8DFF) else Color.White.copy(alpha = .18f),
+                icon = Icons.AutoMirrored.Filled.Chat,
+                description = "Znikający czat",
+                enabled = state.phase == CallPhase.IN_CALL && state.chatReady,
+                onClick = viewModel::toggleChat,
+            )
+        }
+    }
+}
+
+@Composable
+private fun EphemeralChatPanel(
+    state: AppUiState,
+    onClose: () -> Unit,
+    onSend: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var text by remember { mutableStateOf("") }
+    Card(
+        modifier = modifier.fillMaxWidth().heightIn(max = 360.dp).imePadding(),
+        colors = CardDefaults.cardColors(containerColor = Color(0xEE101820)),
+    ) {
+        Column(Modifier.padding(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Lock, null, tint = Color(0xFF62E6A7), modifier = Modifier.size(18.dp))
+                Text(
+                    "Szyfrowane • wiadomości znikają po minucie",
+                    modifier = Modifier.padding(start = 7.dp).weight(1f),
+                    color = Color.White.copy(alpha = .8f),
+                    style = MaterialTheme.typography.labelMedium,
+                )
+                IconButton(onClick = onClose, modifier = Modifier.size(34.dp)) {
+                    Icon(Icons.Default.Close, "Zamknij czat", tint = Color.White)
+                }
+            }
+            LazyColumn(
+                modifier = Modifier.fillMaxWidth().heightIn(min = 80.dp, max = 220.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+                contentPadding = PaddingValues(vertical = 8.dp),
+            ) {
+                items(state.chatMessages, key = { it.id }) { message ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = if (message.mine) Arrangement.End else Arrangement.Start,
+                    ) {
+                        Surface(
+                            color = if (message.mine) Color(0xFF285FA8) else Color(0xFF26323D),
+                            shape = RoundedCornerShape(14.dp),
+                        ) {
+                            Text(
+                                message.text,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                color = Color.White,
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                        }
+                    }
+                }
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it.take(1_000) },
+                    modifier = Modifier.weight(1f),
+                    placeholder = { Text("Wiadomość…") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                    keyboardActions = KeyboardActions(onSend = {
+                        if (text.isNotBlank()) {
+                            onSend(text)
+                            text = ""
+                        }
+                    }),
+                )
+                IconButton(
+                    onClick = {
+                        if (text.isNotBlank()) {
+                            onSend(text)
+                            text = ""
+                        }
+                    },
+                    enabled = text.isNotBlank(),
+                ) {
+                    Icon(Icons.AutoMirrored.Filled.Send, "Wyślij", tint = Color.White)
+                }
+            }
         }
     }
 }
@@ -487,13 +666,15 @@ private fun RoundIconButton(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     description: String,
     size: Int = 56,
+    enabled: Boolean = true,
     onClick: () -> Unit,
 ) {
     IconButton(
         onClick = onClick,
+        enabled = enabled,
         modifier = Modifier.size(size.dp).background(background, CircleShape),
     ) {
-        Icon(icon, description, tint = Color.White, modifier = Modifier.size((size * .42f).dp))
+        Icon(icon, description, tint = Color.White.copy(alpha = if (enabled) 1f else .35f), modifier = Modifier.size((size * .42f).dp))
     }
 }
 
@@ -568,4 +749,19 @@ private fun requiredPermissions(): Array<String> = buildList {
     add(Manifest.permission.CAMERA)
     add(Manifest.permission.RECORD_AUDIO)
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) add(Manifest.permission.BLUETOOTH_CONNECT)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) add(Manifest.permission.POST_NOTIFICATIONS)
 }.toTypedArray()
+
+private fun hasNotificationPermission(context: Context): Boolean =
+    Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+        context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+
+private fun relativeLastSeen(timestamp: Long): String {
+    val minutes = ((System.currentTimeMillis() - timestamp).coerceAtLeast(0L) / 60_000L)
+    return when {
+        minutes < 1 -> "przed chwilą"
+        minutes < 60 -> "$minutes min temu"
+        minutes < 1_440 -> "${minutes / 60} godz. temu"
+        else -> "${minutes / 1_440} dni temu"
+    }
+}

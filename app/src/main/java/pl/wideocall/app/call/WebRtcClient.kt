@@ -29,6 +29,8 @@ import org.webrtc.VideoSource
 import org.webrtc.VideoTrack
 import org.webrtc.audio.JavaAudioDeviceModule
 import java.util.concurrent.CopyOnWriteArrayList
+import java.nio.ByteBuffer
+import java.nio.charset.StandardCharsets
 
 class WebRtcClient(
     context: Context,
@@ -37,6 +39,8 @@ class WebRtcClient(
     interface Listener {
         fun onLocalIceCandidate(candidate: IceCandidate)
         fun onConnectionStateChanged(connected: Boolean)
+        fun onChatReadyChanged(ready: Boolean)
+        fun onChatMessage(message: String)
         fun onError(message: String)
     }
 
@@ -54,6 +58,7 @@ class WebRtcClient(
     private var localVideoTrack: VideoTrack? = null
     private var localAudioTrack: AudioTrack? = null
     private var remoteVideoTrack: VideoTrack? = null
+    private var dataChannel: DataChannel? = null
     private var localRenderer: SurfaceViewRenderer? = null
     private var remoteRenderer: SurfaceViewRenderer? = null
     private val queuedRemoteCandidates = CopyOnWriteArrayList<IceCandidate>()
@@ -73,7 +78,7 @@ class WebRtcClient(
             .createPeerConnectionFactory()
     }
 
-    fun prepareCall() {
+    fun prepareCall(isCaller: Boolean) {
         closePeerConnection()
         remoteDescriptionSet = false
         startLocalMedia()
@@ -107,7 +112,9 @@ class WebRtcClient(
                 override fun onIceCandidatesRemoved(candidates: Array<out IceCandidate>) = Unit
                 override fun onAddStream(stream: MediaStream) = Unit
                 override fun onRemoveStream(stream: MediaStream) = Unit
-                override fun onDataChannel(channel: DataChannel) = Unit
+                override fun onDataChannel(channel: DataChannel) {
+                    bindDataChannel(channel)
+                }
                 override fun onRenegotiationNeeded() = Unit
                 override fun onAddTrack(receiver: RtpReceiver, mediaStreams: Array<out MediaStream>) {
                     attachRemoteTrack(receiver.track())
@@ -118,6 +125,11 @@ class WebRtcClient(
                 }
             }
         ) ?: error("Nie udało się utworzyć połączenia WebRTC")
+
+        if (isCaller) {
+            val init = DataChannel.Init().apply { ordered = true }
+            peerConnection?.createDataChannel(CHAT_CHANNEL, init)?.let(::bindDataChannel)
+        }
 
         localVideoTrack?.let { peerConnection?.addTrack(it, listOf(STREAM_ID)) }
         localAudioTrack?.let { peerConnection?.addTrack(it, listOf(STREAM_ID)) }
@@ -190,6 +202,13 @@ class WebRtcClient(
         frontCamera = !frontCamera
     }
 
+    fun sendChatMessage(message: String): Boolean {
+        val channel = dataChannel ?: return false
+        if (channel.state() != DataChannel.State.OPEN) return false
+        val bytes = message.toByteArray(StandardCharsets.UTF_8)
+        return channel.send(DataChannel.Buffer(ByteBuffer.wrap(bytes), false))
+    }
+
     fun endCall() {
         bindRemoteRenderer(null)
         bindLocalRenderer(null)
@@ -245,12 +264,41 @@ class WebRtcClient(
     }
 
     private fun closePeerConnection() {
+        dataChannel?.unregisterObserver()
+        dataChannel?.close()
+        dataChannel?.dispose()
+        dataChannel = null
+        listener.onChatReadyChanged(false)
         peerConnection?.close()
         peerConnection?.dispose()
         peerConnection = null
         remoteDescriptionSet = false
         queuedRemoteCandidates.clear()
         remoteVideoTrack = null
+    }
+
+    private fun bindDataChannel(channel: DataChannel) {
+        if (dataChannel === channel) return
+        dataChannel?.unregisterObserver()
+        dataChannel?.close()
+        dataChannel?.dispose()
+        dataChannel = channel
+        channel.registerObserver(object : DataChannel.Observer {
+            override fun onBufferedAmountChange(previousAmount: Long) = Unit
+
+            override fun onStateChange() {
+                listener.onChatReadyChanged(channel.state() == DataChannel.State.OPEN)
+            }
+
+            override fun onMessage(buffer: DataChannel.Buffer) {
+                if (buffer.binary) return
+                val source = buffer.data.slice()
+                val bytes = ByteArray(source.remaining())
+                source.get(bytes)
+                listener.onChatMessage(String(bytes, StandardCharsets.UTF_8))
+            }
+        })
+        listener.onChatReadyChanged(channel.state() == DataChannel.State.OPEN)
     }
 
     private fun attachRemoteTrack(track: org.webrtc.MediaStreamTrack?) {
@@ -320,5 +368,6 @@ class WebRtcClient(
 
     companion object {
         private const val STREAM_ID = "wideocall"
+        private const val CHAT_CHANNEL = "ephemeral-chat"
     }
 }

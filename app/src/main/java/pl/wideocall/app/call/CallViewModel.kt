@@ -8,11 +8,18 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.webrtc.IceCandidate
 import org.webrtc.SurfaceViewRenderer
+import org.json.JSONObject
 import pl.wideocall.app.data.AppPreferences
 import pl.wideocall.app.data.Contact
+import pl.wideocall.app.notifications.CallNotifications
+import pl.wideocall.app.notifications.AppVisibility
+import pl.wideocall.app.notifications.OngoingCallService
+import pl.wideocall.app.signaling.ContactPresence
 import pl.wideocall.app.signaling.SignalMessage
 import pl.wideocall.app.signaling.SignalingClient
 import java.util.UUID
@@ -31,12 +38,24 @@ data class AppUiState(
     val myId: String,
     val displayName: String,
     val contacts: List<Contact>,
+    val contactPresence: Map<String, ContactPresence> = emptyMap(),
     val phase: CallPhase = CallPhase.CONNECTING_SERVER,
     val status: String = "Łączenie…",
     val remoteId: String? = null,
     val remoteName: String? = null,
+    val callId: String? = null,
     val microphoneEnabled: Boolean = true,
     val frontCamera: Boolean = true,
+    val chatMessages: List<EphemeralChatMessage> = emptyList(),
+    val chatReady: Boolean = false,
+    val chatVisible: Boolean = false,
+)
+
+data class EphemeralChatMessage(
+    val id: String,
+    val text: String,
+    val mine: Boolean,
+    val createdAt: Long,
 )
 
 class CallViewModel(application: Application) : AndroidViewModel(application),
@@ -59,6 +78,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     private var activeRemoteId: String? = null
     private var pendingOffer: SignalMessage? = null
     private val pendingIncomingCandidates = mutableListOf<IceCandidate>()
+    private var callTimeoutJob: Job? = null
 
     init {
         connect()
@@ -79,11 +99,18 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         if (normalizedId.length != 9 || normalizedId == _state.value.myId) return
         preferences.saveContact(Contact(normalizedId, name))
         _state.update { it.copy(contacts = preferences.contacts()) }
+        signalingClient.observeContacts(_state.value.contacts.map(Contact::id))
     }
 
     fun removeContact(id: String) {
         preferences.removeContact(id)
-        _state.update { it.copy(contacts = preferences.contacts()) }
+        _state.update { current ->
+            current.copy(
+                contacts = preferences.contacts(),
+                contactPresence = current.contactPresence - AppPreferences.normalizeId(id),
+            )
+        }
+        signalingClient.observeContacts(_state.value.contacts.map(Contact::id))
     }
 
     fun call(contact: Contact) {
@@ -97,12 +124,18 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 status = "Dzwonienie…",
                 remoteId = contact.id,
                 remoteName = contact.name,
+                callId = callId,
                 microphoneEnabled = true,
                 frontCamera = true,
+                chatMessages = emptyList(),
+                chatReady = false,
+                chatVisible = false,
             )
         }
+        signalingClient.setBusy(true)
+        startOutgoingTimeout(callId, contact.id)
         runCatching {
-            webRtcClient.prepareCall()
+            webRtcClient.prepareCall(isCaller = true)
             webRtcClient.createOffer { offer ->
                 signalingClient.send(
                     SignalMessage(
@@ -125,8 +158,10 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         activeCallId = offer.callId
         activeRemoteId = remoteId
         _state.update { it.copy(phase = CallPhase.CONNECTING_CALL, status = "Łączenie…") }
+        callTimeoutJob?.cancel()
+        CallNotifications.cancel(getApplication(), offer.callId)
         runCatching {
-            webRtcClient.prepareCall()
+            webRtcClient.prepareCall(isCaller = false)
             webRtcClient.setRemoteDescription(offer.sdpType ?: "offer", sdp) {
                 pendingIncomingCandidates.forEach(webRtcClient::addRemoteIceCandidate)
                 pendingIncomingCandidates.clear()
@@ -159,6 +194,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 )
             )
         }
+        CallNotifications.cancel(getApplication(), offer?.callId)
         pendingOffer = null
         clearCall("Gotowy")
     }
@@ -189,6 +225,19 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         _state.update { it.copy(frontCamera = !it.frontCamera) }
     }
 
+    fun toggleChat() {
+        _state.update { it.copy(chatVisible = !it.chatVisible) }
+    }
+
+    fun sendChatMessage(raw: String) {
+        if (_state.value.phase != CallPhase.IN_CALL || !_state.value.chatReady) return
+        val text = EphemeralChatPolicy.sanitize(raw)
+        if (text.isBlank()) return
+        val message = EphemeralChatMessage(UUID.randomUUID().toString(), text, true, System.currentTimeMillis())
+        val payload = JSONObject().put("text", message.text).toString()
+        if (webRtcClient.sendChatMessage(payload)) addChatMessage(message)
+    }
+
     fun bindLocalRenderer(renderer: SurfaceViewRenderer?) = webRtcClient.bindLocalRenderer(renderer)
     fun bindRemoteRenderer(renderer: SurfaceViewRenderer?) = webRtcClient.bindRemoteRenderer(renderer)
     fun eglContext() = webRtcClient.eglContext
@@ -196,6 +245,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     override fun onConnected() = onMain {
         if (_state.value.phase in listOf(CallPhase.CONNECTING_SERVER, CallPhase.SERVER_ERROR, CallPhase.READY)) {
             _state.update { it.copy(phase = CallPhase.READY, status = "Gotowy do rozmowy") }
+            signalingClient.observeContacts(_state.value.contacts.map(Contact::id))
         }
     }
 
@@ -226,6 +276,10 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         }
     }
 
+    override fun onPresenceChanged(userId: String, presence: ContactPresence) = onMain {
+        _state.update { it.copy(contactPresence = it.contactPresence + (userId to presence)) }
+    }
+
     override fun onLocalIceCandidate(candidate: IceCandidate) {
         val remoteId = activeRemoteId ?: return
         signalingClient.send(
@@ -244,9 +298,26 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     override fun onConnectionStateChanged(connected: Boolean) = onMain {
         if (connected) {
             _state.update { it.copy(phase = CallPhase.IN_CALL, status = "Połączono") }
+            callTimeoutJob?.cancel()
+            val callId = activeCallId
+            val remote = _state.value.remoteName ?: activeRemoteId
+            if (callId != null && remote != null) OngoingCallService.start(getApplication(), remote, callId)
         } else if (_state.value.phase in listOf(CallPhase.CONNECTING_CALL, CallPhase.IN_CALL)) {
             clearCall("Połączenie zostało przerwane")
         }
+    }
+
+    override fun onChatReadyChanged(ready: Boolean) = onMain {
+        _state.update { it.copy(chatReady = ready) }
+    }
+
+    override fun onChatMessage(message: String) = onMain {
+        val parsed = runCatching {
+            val json = JSONObject(message)
+            val text = EphemeralChatPolicy.sanitize(json.getString("text"))
+            if (text.isBlank()) null else EphemeralChatMessage(UUID.randomUUID().toString(), text, false, System.currentTimeMillis())
+        }.getOrNull() ?: return@onMain
+        addChatMessage(parsed)
     }
 
     override fun onError(message: String) = onMain { failCall(message) }
@@ -270,11 +341,22 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 status = "Połączenie przychodzące",
                 remoteId = from,
                 remoteName = contact?.name ?: from,
+                callId = message.callId,
+                chatMessages = emptyList(),
+                chatReady = false,
+                chatVisible = false,
             )
         }
+        if (AppVisibility.isForeground) CallNotifications.cancel(getApplication(), message.callId)
+        signalingClient.setBusy(true)
+        startIncomingTimeout(message.callId)
     }
 
     private fun failCall(message: String) {
+        callTimeoutJob?.cancel()
+        signalingClient.setBusy(false)
+        CallNotifications.cancel(getApplication(), activeCallId)
+        OngoingCallService.stop(getApplication())
         webRtcClient.endCall()
         activeCallId = null
         activeRemoteId = null
@@ -286,11 +368,19 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 status = message,
                 remoteId = null,
                 remoteName = null,
+                callId = null,
+                chatMessages = emptyList(),
+                chatReady = false,
+                chatVisible = false,
             )
         }
     }
 
     private fun clearCall(status: String) {
+        callTimeoutJob?.cancel()
+        signalingClient.setBusy(false)
+        CallNotifications.cancel(getApplication(), activeCallId)
+        OngoingCallService.stop(getApplication())
         webRtcClient.endCall()
         activeCallId = null
         activeRemoteId = null
@@ -302,9 +392,46 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 status = status,
                 remoteId = null,
                 remoteName = null,
+                callId = null,
                 microphoneEnabled = true,
                 frontCamera = true,
+                chatMessages = emptyList(),
+                chatReady = false,
+                chatVisible = false,
             )
+        }
+    }
+
+    private fun addChatMessage(message: EphemeralChatMessage) {
+        _state.update { it.copy(chatMessages = (it.chatMessages + message).takeLast(MAX_CHAT_MESSAGES)) }
+        viewModelScope.launch {
+            delay(EphemeralChatPolicy.LIFETIME_MS)
+            _state.update { current -> current.copy(chatMessages = current.chatMessages.filterNot { it.id == message.id }) }
+        }
+    }
+
+    private fun startOutgoingTimeout(callId: String, remoteId: String) {
+        callTimeoutJob?.cancel()
+        callTimeoutJob = viewModelScope.launch {
+            delay(CALL_TIMEOUT_MS)
+            if (activeCallId == callId && _state.value.phase in setOf(CallPhase.OUTGOING, CallPhase.CONNECTING_CALL)) {
+                signalingClient.send(
+                    SignalMessage(type = "hangup", from = _state.value.myId, to = remoteId, callId = callId)
+                )
+                clearCall("Nie odebrano")
+            }
+        }
+    }
+
+    private fun startIncomingTimeout(callId: String?) {
+        if (callId == null) return
+        callTimeoutJob?.cancel()
+        callTimeoutJob = viewModelScope.launch {
+            delay(CALL_TIMEOUT_MS)
+            if (activeCallId == callId && _state.value.phase == CallPhase.INCOMING) {
+                CallNotifications.cancel(getApplication(), callId)
+                clearCall("Nie odebrano")
+            }
         }
     }
 
@@ -313,8 +440,15 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     }
 
     override fun onCleared() {
+        callTimeoutJob?.cancel()
+        OngoingCallService.stop(getApplication())
         signalingClient.close()
         webRtcClient.release()
         super.onCleared()
+    }
+
+    companion object {
+        private const val CALL_TIMEOUT_MS = 35_000L
+        private const val MAX_CHAT_MESSAGES = 100
     }
 }
