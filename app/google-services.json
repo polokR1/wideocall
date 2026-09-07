@@ -1,0 +1,30 @@
+{
+  "project_info": {
+    "project_number": "885420218020",
+    "firebase_url": "https://vidcall-88857-default-rtdb.europe-west1.firebasedatabase.app",
+    "project_id": "vidcall-88857",
+    "storage_bucket": "vidcall-88857.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:885420218020:android:58d9112e904bd6d3597831",
+        "android_client_info": {
+          "package_name": "pl.wideocall.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCZ98QwbJAEz50V45tC7mHpEj1Rc00u1Ow"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

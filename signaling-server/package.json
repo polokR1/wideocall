@@ -1,0 +1,15 @@
+{
+  "name": "wideocall-signaling-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Minimalny serwer sygnalizacyjny WebRTC dla Wideocall",
+  "type": "module",
+  "scripts": {
+    "start": "node signaling-server.mjs",
+    "check": "node --check signaling-server.mjs",
+    "test": "node test-server.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

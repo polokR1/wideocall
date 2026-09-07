@@ -1,0 +1,22 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "users": {
+      "$userId": {
+        ".read": "auth != null",
+        ".write": "auth != null && newData.exists() && newData.child('authUid').val() === auth.uid && (!data.exists() || data.child('authUid').val() === auth.uid)",
+        ".validate": "$userId.matches(/^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/) && newData.hasChildren(['authUid', 'online', 'lastSeen']) && newData.child('authUid').isString() && newData.child('online').isBoolean() && newData.child('lastSeen').isNumber()"
+      }
+    },
+    "signals": {
+      "$recipientId": {
+        ".read": "auth != null && root.child('users').child($recipientId).child('authUid').val() === auth.uid",
+        "$messageId": {
+          ".write": "auth != null && ((!data.exists() && newData.exists() && newData.child('senderUid').val() === auth.uid && newData.child('to').val() === $recipientId && root.child('users').child(newData.child('from').val()).child('authUid').val() === auth.uid) || (data.exists() && !newData.exists() && root.child('users').child($recipientId).child('authUid').val() === auth.uid))",
+          ".validate": "!newData.exists() || (newData.hasChildren(['type', 'from', 'to', 'senderUid', 'createdAt']) && newData.child('type').isString() && newData.child('from').isString() && newData.child('to').isString() && newData.child('senderUid').isString() && newData.child('createdAt').isNumber() && newData.child('createdAt').val() > now - 120000 && newData.child('createdAt').val() < now + 10000)"
+        }
+      }
+    }
+  }
+}
