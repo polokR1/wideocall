@@ -10,11 +10,14 @@ import com.google.firebase.database.FirebaseDatabase
 import com.google.firebase.database.ServerValue
 import com.google.firebase.database.ValueEventListener
 import pl.wideocall.app.notifications.PushTokenRegistry
+import pl.wideocall.app.notifications.AppVisibility
+import pl.wideocall.app.BuildConfig
 
 data class ContactPresence(
     val online: Boolean = false,
     val busy: Boolean = false,
     val pushReady: Boolean = false,
+    val watchReady: Boolean = false,
     val lastSeen: Long = 0L,
 )
 
@@ -99,12 +102,13 @@ class SignalingClient(
                 .addOnSuccessListener { snapshot ->
                     val online = snapshot.child("online").getValue(Boolean::class.java) == true
                     val pushReady = snapshot.child("pushReady").getValue(Boolean::class.java) == true
+                    val watchReady = snapshot.child("watchReady").getValue(Boolean::class.java) == true
                     val busy = snapshot.child("busy").getValue(Boolean::class.java) == true
                     if (busy) {
                         listener.onMessage(
                             SignalMessage(type = "busy", from = recipientId, to = currentUserId, callId = message.callId)
                         )
-                    } else if (online || pushReady) {
+                    } else if (online || pushReady || watchReady) {
                         enqueue(message, currentUid)
                     } else {
                         listener.onMessage(
@@ -140,6 +144,7 @@ class SignalingClient(
                             online = snapshot.child("online").getValue(Boolean::class.java) == true,
                             busy = snapshot.child("busy").getValue(Boolean::class.java) == true,
                             pushReady = snapshot.child("pushReady").getValue(Boolean::class.java) == true,
+                            watchReady = snapshot.child("watchReady").getValue(Boolean::class.java) == true,
                             lastSeen = snapshot.child("lastSeen").getValue(Long::class.java) ?: 0L,
                         ),
                     )
@@ -217,7 +222,8 @@ class SignalingClient(
             override fun doTransaction(data: com.google.firebase.database.MutableData): com.google.firebase.database.Transaction.Result {
                 val owner = data.child("authUid").getValue(String::class.java)
                 if (owner != null && owner != uid) return com.google.firebase.database.Transaction.abort()
-                data.value = onlinePresence(uid)
+                val watchReady = data.child("watchReady").getValue(Boolean::class.java) ?: false
+                data.value = onlinePresence(uid, watchReady)
                 return com.google.firebase.database.Transaction.success(data)
             }
 
@@ -237,7 +243,7 @@ class SignalingClient(
                         if (generation != connectionGeneration || intentionallyClosed) return@addOnSuccessListener
                         attachSignalListener(userId, generation)
                         ready = true
-                        PushTokenRegistry.refresh(userId, uid, currentDatabase)
+                        if (BuildConfig.FCM_ENABLED) PushTokenRegistry.refresh(userId, uid, currentDatabase)
                         listener.onConnected()
                     }
                     .addOnFailureListener { failure ->
@@ -319,11 +325,12 @@ class SignalingClient(
         listener.onDisconnected(if (detail == null) message else "$message: $detail")
     }
 
-    private fun onlinePresence(uid: String): Map<String, Any> = mapOf(
+    private fun onlinePresence(uid: String, watchReady: Boolean): Map<String, Any> = mapOf(
         "authUid" to uid,
-        "online" to true,
+        "online" to AppVisibility.isForeground,
         "busy" to false,
         "pushReady" to false,
+        "watchReady" to watchReady,
         "lastSeen" to ServerValue.TIMESTAMP,
     )
 

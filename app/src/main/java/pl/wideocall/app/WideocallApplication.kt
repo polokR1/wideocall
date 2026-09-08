@@ -8,6 +8,7 @@ import pl.wideocall.app.notifications.CallNotifications
 class WideocallApplication : Application() {
     override fun onCreate() {
         super.onCreate()
+        AppVisibility.initialize(this)
         ProcessLifecycleOwner.get().lifecycle.addObserver(AppVisibility)
         CallNotifications.createChannels(this)
     }

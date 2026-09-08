@@ -69,6 +69,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -96,8 +97,10 @@ import org.webrtc.SurfaceViewRenderer
 import pl.wideocall.app.call.AppUiState
 import pl.wideocall.app.call.CallPhase
 import pl.wideocall.app.call.CallViewModel
+import pl.wideocall.app.data.AppPreferences
 import pl.wideocall.app.data.Contact
 import pl.wideocall.app.notifications.CallNotifications
+import pl.wideocall.app.notifications.CallWatcherService
 import pl.wideocall.app.signaling.ContactPresence
 import pl.wideocall.app.ui.theme.WideocallTheme
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -123,6 +126,12 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         captureNotificationAction(intent)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        viewModel.refreshPreferences()
+        if (AppPreferences(this).watchEnabled) CallWatcherService.start(this)
     }
 
     private fun captureNotificationAction(intent: Intent?) {
@@ -267,7 +276,7 @@ private fun HomeScreen(
                         contact = contact,
                         presence = state.contactPresence[contact.id],
                         callEnabled = state.phase == CallPhase.READY && permissionsGranted &&
-                            state.contactPresence[contact.id]?.let { !it.busy && (it.online || it.pushReady) } == true,
+                            state.contactPresence[contact.id]?.let { !it.busy && (it.online || it.pushReady || it.watchReady) } == true,
                         onCall = { viewModel.call(contact) },
                         onDelete = { viewModel.removeContact(contact.id) },
                     )
@@ -289,8 +298,8 @@ private fun HomeScreen(
         SettingsDialog(
             state = state,
             onDismiss = { showSettings = false },
-            onSave = { name ->
-                viewModel.saveSettings(name)
+            onSave = { name, watchEnabled ->
+                viewModel.saveSettings(name, watchEnabled)
                 showSettings = false
             },
         )
@@ -378,12 +387,14 @@ private fun ContactCard(
     val presenceColor = when {
         presence?.busy == true -> Color(0xFFFF6B6B)
         presence?.online == true -> Color(0xFF3DDC97)
+        presence?.watchReady == true -> Color(0xFF3C8DFF)
         presence?.pushReady == true -> Color(0xFFFFC857)
         else -> MaterialTheme.colorScheme.outline
     }
     val presenceText = when {
         presence?.busy == true -> "Zajęty"
         presence?.online == true -> "Dostępny"
+        presence?.watchReady == true -> "Czuwanie aktywne"
         presence?.pushReady == true -> "Dostępny przez powiadomienie"
         presence == null -> "Sprawdzanie dostępności…"
         presence.lastSeen > 0L -> "Offline • ostatnio ${relativeLastSeen(presence.lastSeen)}"
@@ -713,8 +724,9 @@ private fun AddContactDialog(onDismiss: () -> Unit, onSave: (String, String) -> 
 }
 
 @Composable
-private fun SettingsDialog(state: AppUiState, onDismiss: () -> Unit, onSave: (String) -> Unit) {
+private fun SettingsDialog(state: AppUiState, onDismiss: () -> Unit, onSave: (String, Boolean) -> Unit) {
     var name by remember { mutableStateOf(state.displayName) }
+    var watchEnabled by remember { mutableStateOf(state.watchEnabled) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Ustawienia") },
@@ -727,15 +739,29 @@ private fun SettingsDialog(state: AppUiState, onDismiss: () -> Unit, onSave: (St
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Czuwanie w tle", fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "Stałe, ciche powiadomienie pozwala odbierać połączenia po zamknięciu aplikacji.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(checked = watchEnabled, onCheckedChange = { watchEnabled = it })
+                }
                 Text(
-                    "Połączenia są zestawiane automatycznie przez Firebase.",
+                    "Połączenia są zestawiane automatycznie przez Firebase. Bez kont i logowania.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         },
         confirmButton = {
-            Button(onClick = { onSave(name) }, enabled = name.isNotBlank()) { Text("Zapisz") }
+            Button(onClick = { onSave(name, watchEnabled) }, enabled = name.isNotBlank()) { Text("Zapisz") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Anuluj") } },
     )

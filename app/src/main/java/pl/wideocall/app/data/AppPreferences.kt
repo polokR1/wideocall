@@ -24,6 +24,10 @@ class AppPreferences(context: Context) {
         get() = preferences.getString(KEY_DISPLAY_NAME, "Mój telefon") ?: "Mój telefon"
         set(value) = preferences.edit().putString(KEY_DISPLAY_NAME, value.trim()).apply()
 
+    var watchEnabled: Boolean
+        get() = preferences.getBoolean(KEY_WATCH_ENABLED, true)
+        set(value) = preferences.edit().putBoolean(KEY_WATCH_ENABLED, value).apply()
+
     fun contacts(): List<Contact> {
         val raw = preferences.getString(KEY_CONTACTS, "[]") ?: "[]"
         return runCatching {
@@ -65,6 +69,7 @@ class AppPreferences(context: Context) {
         private const val KEY_MY_ID = "my_id"
         private const val KEY_DISPLAY_NAME = "display_name"
         private const val KEY_CONTACTS = "contacts"
+        private const val KEY_WATCH_ENABLED = "watch_enabled"
         private const val ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
         private val random = SecureRandom()
 

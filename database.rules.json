@@ -6,7 +6,7 @@
       "$userId": {
         ".read": "auth != null",
         ".write": "auth != null && ((newData.exists() && newData.child('authUid').val() === auth.uid && (!data.exists() || data.child('authUid').val() === auth.uid)) || (!newData.exists() && data.child('authUid').val() === auth.uid))",
-        ".validate": "$userId.matches(/^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/) && newData.hasChildren(['authUid', 'online', 'lastSeen']) && newData.child('authUid').isString() && newData.child('online').isBoolean() && (!newData.hasChild('busy') || newData.child('busy').isBoolean()) && (!newData.hasChild('pushReady') || newData.child('pushReady').isBoolean()) && newData.child('lastSeen').isNumber()"
+        ".validate": "$userId.matches(/^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/) && newData.hasChildren(['authUid', 'online', 'lastSeen']) && newData.child('authUid').isString() && newData.child('online').isBoolean() && (!newData.hasChild('busy') || newData.child('busy').isBoolean()) && (!newData.hasChild('pushReady') || newData.child('pushReady').isBoolean()) && (!newData.hasChild('watchReady') || newData.child('watchReady').isBoolean()) && newData.child('lastSeen').isNumber()"
       }
     },
     "devices": {

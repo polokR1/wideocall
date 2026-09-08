@@ -18,6 +18,7 @@ import pl.wideocall.app.data.AppPreferences
 import pl.wideocall.app.data.Contact
 import pl.wideocall.app.notifications.CallNotifications
 import pl.wideocall.app.notifications.AppVisibility
+import pl.wideocall.app.notifications.CallWatcherService
 import pl.wideocall.app.notifications.OngoingCallService
 import pl.wideocall.app.signaling.ContactPresence
 import pl.wideocall.app.signaling.SignalMessage
@@ -38,6 +39,7 @@ data class AppUiState(
     val myId: String,
     val displayName: String,
     val contacts: List<Contact>,
+    val watchEnabled: Boolean = true,
     val contactPresence: Map<String, ContactPresence> = emptyMap(),
     val phase: CallPhase = CallPhase.CONNECTING_SERVER,
     val status: String = "Łączenie…",
@@ -70,6 +72,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
             myId = preferences.myId,
             displayName = preferences.displayName,
             contacts = preferences.contacts(),
+            watchEnabled = preferences.watchEnabled,
         )
     )
     val state: StateFlow<AppUiState> = _state.asStateFlow()
@@ -89,9 +92,24 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         signalingClient.connect(_state.value.myId)
     }
 
-    fun saveSettings(displayName: String) {
+    fun refreshPreferences() {
+        _state.update {
+            it.copy(
+                displayName = preferences.displayName,
+                watchEnabled = preferences.watchEnabled,
+            )
+        }
+    }
+
+    fun saveSettings(displayName: String, watchEnabled: Boolean) {
         preferences.displayName = displayName
-        _state.update { it.copy(displayName = preferences.displayName) }
+        preferences.watchEnabled = watchEnabled
+        if (watchEnabled) {
+            CallWatcherService.start(getApplication())
+        } else {
+            CallWatcherService.stop(getApplication())
+        }
+        _state.update { it.copy(displayName = preferences.displayName, watchEnabled = watchEnabled) }
     }
 
     fun addContact(name: String, id: String) {

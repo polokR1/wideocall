@@ -3,13 +3,16 @@ package pl.wideocall.app.notifications
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
 import pl.wideocall.app.data.AppPreferences
+import pl.wideocall.app.BuildConfig
 
 class WideocallMessagingService : FirebaseMessagingService() {
     override fun onNewToken(token: String) {
+        if (!BuildConfig.FCM_ENABLED) return
         PushTokenRegistry.refreshAfterTokenChange(this, token)
     }
 
     override fun onMessageReceived(message: RemoteMessage) {
+        if (!BuildConfig.FCM_ENABLED) return
         val data = message.data
         if (data["type"] != "incoming_call") return
         val callerId = data["callerId"] ?: return
