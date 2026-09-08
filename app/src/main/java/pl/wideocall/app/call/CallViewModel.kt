@@ -82,12 +82,15 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     private var pendingOffer: SignalMessage? = null
     private val pendingIncomingCandidates = mutableListOf<IceCandidate>()
     private var callTimeoutJob: Job? = null
+    private var reconnectJob: Job? = null
 
     init {
         connect()
     }
 
     fun connect() {
+        reconnectJob?.cancel()
+        reconnectJob = null
         _state.update { it.copy(phase = CallPhase.CONNECTING_SERVER, status = "Łączenie z Firebase…") }
         signalingClient.connect(_state.value.myId)
     }
@@ -261,6 +264,8 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     fun eglContext() = webRtcClient.eglContext
 
     override fun onConnected() = onMain {
+        reconnectJob?.cancel()
+        reconnectJob = null
         if (_state.value.phase in listOf(CallPhase.CONNECTING_SERVER, CallPhase.SERVER_ERROR, CallPhase.READY)) {
             _state.update { it.copy(phase = CallPhase.READY, status = "Gotowy do rozmowy") }
             signalingClient.observeContacts(_state.value.contacts.map(Contact::id))
@@ -269,7 +274,8 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
 
     override fun onDisconnected(reason: String) = onMain {
         if (_state.value.phase == CallPhase.READY || _state.value.phase == CallPhase.CONNECTING_SERVER) {
-            _state.update { it.copy(phase = CallPhase.SERVER_ERROR, status = reason) }
+            _state.update { it.copy(phase = CallPhase.SERVER_ERROR, status = "$reason • ponawiam połączenie…") }
+            scheduleReconnect()
         } else {
             failCall("Utracono połączenie z serwerem")
         }
@@ -453,12 +459,22 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         }
     }
 
+    private fun scheduleReconnect() {
+        if (reconnectJob?.isActive == true) return
+        reconnectJob = viewModelScope.launch {
+            delay(RECONNECT_DELAY_MS)
+            reconnectJob = null
+            if (_state.value.phase == CallPhase.SERVER_ERROR) connect()
+        }
+    }
+
     private fun onMain(block: () -> Unit) {
         viewModelScope.launch(Dispatchers.Main.immediate) { block() }
     }
 
     override fun onCleared() {
         callTimeoutJob?.cancel()
+        reconnectJob?.cancel()
         OngoingCallService.stop(getApplication())
         signalingClient.close()
         webRtcClient.release()
@@ -467,6 +483,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
 
     companion object {
         private const val CALL_TIMEOUT_MS = 35_000L
+        private const val RECONNECT_DELAY_MS = 5_000L
         private const val MAX_CHAT_MESSAGES = 100
     }
 }

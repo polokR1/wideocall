@@ -23,6 +23,7 @@ import com.google.firebase.database.FirebaseDatabase
 import com.google.firebase.database.ServerValue
 import pl.wideocall.app.MainActivity
 import pl.wideocall.app.R
+import pl.wideocall.app.auth.AnonymousFirebaseAuth
 import pl.wideocall.app.data.AppPreferences
 
 class CallWatcherService : Service() {
@@ -61,14 +62,11 @@ class CallWatcherService : Service() {
         val database = FirebaseDatabase.getInstance(databaseUrl)
         val auth = FirebaseAuth.getInstance(app)
         val userId = AppPreferences(this).myId
-        val current = auth.currentUser
-        if (current != null) {
-            registerWatcher(database, userId, current.uid)
-        } else {
-            auth.signInAnonymously()
-                .addOnSuccessListener { result -> result.user?.uid?.let { registerWatcher(database, userId, it) } ?: showError() }
-                .addOnFailureListener { showError() }
-        }
+        AnonymousFirebaseAuth.ensureSignedIn(
+            auth = auth,
+            onSuccess = { uid -> if (!intentionallyStopped) registerWatcher(database, userId, uid) },
+            onFailure = { if (!intentionallyStopped) showError() },
+        )
     }
 
     private fun registerWatcher(database: FirebaseDatabase, userId: String, uid: String) {

@@ -17,7 +17,7 @@ Prywatny wideotelefon na Androida: rozmowy wideo i audio 1:1 oraz znikające wia
 
 Projekt korzysta z Firebase `vidcall-88857`. Logowanie anonimowe jest włączone, baza Realtime Database działa w regionie `europe-west1`, a `app/google-services.json` zawiera jej adres. Reguły zostały zweryfikowane testem zapisu obecności oraz wysłania, odczytu i usunięcia sygnału.
 
-Reguły obecności, statusu czuwania, prywatnych tokenów urządzeń i sygnalizacji są wdrożone. Funkcja `notifyIncomingCall` jest gotowa w katalogu `functions/`, ale nie jest wdrożona, ponieważ wymaga planu Firebase Blaze. Nie jest potrzebna do działania bezpłatnego czuwania w wersji 0.4.0.
+Reguły obecności, statusu czuwania, prywatnych tokenów urządzeń i sygnalizacji są wdrożone. Funkcja `notifyIncomingCall` jest gotowa w katalogu `functions/`, ale nie jest wdrożona, ponieważ wymaga planu Firebase Blaze. Nie jest potrzebna do działania bezpłatnego czuwania w wersji 0.4.1.
 
 Po każdej zmianie reguł lub funkcji należy wdrożyć odpowiednią część projektu:
 

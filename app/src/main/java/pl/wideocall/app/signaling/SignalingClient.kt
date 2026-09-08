@@ -9,6 +9,7 @@ import com.google.firebase.database.DatabaseReference
 import com.google.firebase.database.FirebaseDatabase
 import com.google.firebase.database.ServerValue
 import com.google.firebase.database.ValueEventListener
+import pl.wideocall.app.auth.AnonymousFirebaseAuth
 import pl.wideocall.app.notifications.PushTokenRegistry
 import pl.wideocall.app.notifications.AppVisibility
 import pl.wideocall.app.BuildConfig
@@ -65,29 +66,21 @@ class SignalingClient(
         auth = firebaseAuth
         database = FirebaseDatabase.getInstance(databaseUrl)
 
-        firebaseAuth.currentUser?.let { currentUser ->
-            attachToDatabase(userId, currentUser.uid, generation)
-            return
-        }
-
-        firebaseAuth.signInAnonymously()
-            .addOnSuccessListener { result ->
-                if (generation != connectionGeneration || intentionallyClosed) return@addOnSuccessListener
-                val uid = result.user?.uid
-                if (uid == null) {
-                    reportDisconnected("Firebase nie zwrócił identyfikatora użytkownika")
-                } else {
-                    attachToDatabase(userId, uid, generation)
-                }
-            }
-            .addOnFailureListener { error ->
+        AnonymousFirebaseAuth.ensureSignedIn(
+            auth = firebaseAuth,
+            onSuccess = success@{ uid ->
+                if (generation != connectionGeneration || intentionallyClosed) return@success
+                attachToDatabase(userId, uid, generation)
+            },
+            onFailure = { error ->
                 if (generation == connectionGeneration && !intentionallyClosed) {
                     reportDisconnected(
                         "Nie udało się zalogować w Firebase. Włącz logowanie anonimowe w Authentication.",
                         error,
                     )
                 }
-            }
+            },
+        )
     }
 
     fun send(message: SignalMessage): Boolean {

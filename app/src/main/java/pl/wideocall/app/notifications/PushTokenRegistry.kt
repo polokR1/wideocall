@@ -5,6 +5,7 @@ import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.database.FirebaseDatabase
 import com.google.firebase.database.ServerValue
 import com.google.firebase.messaging.FirebaseMessaging
+import pl.wideocall.app.auth.AnonymousFirebaseAuth
 import pl.wideocall.app.data.AppPreferences
 
 object PushTokenRegistry {
@@ -21,16 +22,11 @@ object PushTokenRegistry {
         val databaseUrl = app.options.databaseUrl ?: return
         val auth = FirebaseAuth.getInstance(app)
         val userId = AppPreferences(context).myId
-        val current = auth.currentUser
-        if (current != null) {
-            save(userId, current.uid, token, FirebaseDatabase.getInstance(databaseUrl))
-        } else {
-            auth.signInAnonymously().addOnSuccessListener { result ->
-                result.user?.uid?.let { uid ->
-                    save(userId, uid, token, FirebaseDatabase.getInstance(databaseUrl))
-                }
-            }
-        }
+        AnonymousFirebaseAuth.ensureSignedIn(
+            auth = auth,
+            onSuccess = { uid -> save(userId, uid, token, FirebaseDatabase.getInstance(databaseUrl)) },
+            onFailure = {},
+        )
     }
 
     private fun save(userId: String, uid: String, token: String, database: FirebaseDatabase) {
