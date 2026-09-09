@@ -17,6 +17,7 @@ import org.json.JSONObject
 import pl.wideocall.app.data.AppPreferences
 import pl.wideocall.app.data.Contact
 import pl.wideocall.app.notifications.CallNotifications
+import pl.wideocall.app.notifications.ChatNotifications
 import pl.wideocall.app.notifications.AppVisibility
 import pl.wideocall.app.notifications.CallWatcherService
 import pl.wideocall.app.notifications.OngoingCallService
@@ -33,6 +34,8 @@ enum class CallPhase {
     INCOMING,
     CONNECTING_CALL,
     IN_CALL,
+    CONNECTING_CHAT,
+    IN_CHAT,
 }
 
 data class AppUiState(
@@ -79,6 +82,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
 
     private var activeCallId: String? = null
     private var activeRemoteId: String? = null
+    private var activeSessionKind: String = SignalMessage.SESSION_VIDEO
     private var pendingOffer: SignalMessage? = null
     private val pendingIncomingCandidates = mutableListOf<IceCandidate>()
     private var callTimeoutJob: Job? = null
@@ -135,14 +139,24 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     }
 
     fun call(contact: Contact) {
+        startOutgoingSession(contact, SignalMessage.SESSION_VIDEO)
+    }
+
+    fun startChat(contact: Contact) {
+        startOutgoingSession(contact, SignalMessage.SESSION_CHAT)
+    }
+
+    private fun startOutgoingSession(contact: Contact, sessionKind: String) {
         if (_state.value.phase != CallPhase.READY) return
         val callId = UUID.randomUUID().toString()
         activeCallId = callId
         activeRemoteId = contact.id
+        activeSessionKind = sessionKind
+        val chatOnly = sessionKind == SignalMessage.SESSION_CHAT
         _state.update {
             it.copy(
-                phase = CallPhase.OUTGOING,
-                status = "Dzwonienie…",
+                phase = if (chatOnly) CallPhase.CONNECTING_CHAT else CallPhase.OUTGOING,
+                status = if (chatOnly) "Łączenie szyfrowanego czatu…" else "Dzwonienie…",
                 remoteId = contact.id,
                 remoteName = contact.name,
                 callId = callId,
@@ -150,13 +164,13 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 frontCamera = true,
                 chatMessages = emptyList(),
                 chatReady = false,
-                chatVisible = false,
+                chatVisible = chatOnly,
             )
         }
         signalingClient.setBusy(true)
         startOutgoingTimeout(callId, contact.id)
         runCatching {
-            webRtcClient.prepareCall(isCaller = true)
+            webRtcClient.prepareSession(isCaller = true, withMedia = !chatOnly)
             webRtcClient.createOffer { offer ->
                 signalingClient.send(
                     SignalMessage(
@@ -164,25 +178,40 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                         from = _state.value.myId,
                         to = contact.id,
                         callId = callId,
+                        sessionKind = sessionKind,
                         sdpType = offer.type.canonicalForm(),
                         sdp = offer.description,
                     )
                 )
             }
-        }.onFailure { failCall(it.message ?: "Nie udało się rozpocząć rozmowy") }
+        }.onFailure {
+            failCall(it.message ?: if (chatOnly) "Nie udało się rozpocząć czatu" else "Nie udało się rozpocząć rozmowy")
+        }
     }
 
     fun acceptIncomingCall() {
         val offer = pendingOffer ?: return
+        acceptOffer(offer, withMedia = true)
+    }
+
+    private fun acceptOffer(offer: SignalMessage, withMedia: Boolean) {
         val remoteId = offer.from ?: return
         val sdp = offer.sdp ?: return
         activeCallId = offer.callId
         activeRemoteId = remoteId
-        _state.update { it.copy(phase = CallPhase.CONNECTING_CALL, status = "Łączenie…") }
+        activeSessionKind = offer.sessionKind
+        _state.update {
+            it.copy(
+                phase = if (withMedia) CallPhase.CONNECTING_CALL else CallPhase.CONNECTING_CHAT,
+                status = if (withMedia) "Łączenie…" else "Łączenie szyfrowanego czatu…",
+                chatVisible = !withMedia,
+            )
+        }
         callTimeoutJob?.cancel()
         CallNotifications.cancel(getApplication(), offer.callId)
+        ChatNotifications.cancel(getApplication(), offer.callId)
         runCatching {
-            webRtcClient.prepareCall(isCaller = false)
+            webRtcClient.prepareSession(isCaller = false, withMedia = withMedia)
             webRtcClient.setRemoteDescription(offer.sdpType ?: "offer", sdp) {
                 pendingIncomingCandidates.forEach(webRtcClient::addRemoteIceCandidate)
                 pendingIncomingCandidates.clear()
@@ -193,6 +222,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                             from = _state.value.myId,
                             to = remoteId,
                             callId = activeCallId,
+                            sessionKind = offer.sessionKind,
                             sdpType = answer.type.canonicalForm(),
                             sdp = answer.description,
                         )
@@ -200,7 +230,9 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 }
             }
             pendingOffer = null
-        }.onFailure { failCall(it.message ?: "Nie udało się odebrać rozmowy") }
+        }.onFailure {
+            failCall(it.message ?: if (withMedia) "Nie udało się odebrać rozmowy" else "Nie udało się otworzyć czatu")
+        }
     }
 
     fun rejectIncomingCall() {
@@ -212,10 +244,12 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                     from = _state.value.myId,
                     to = offer.from,
                     callId = offer.callId,
+                    sessionKind = offer.sessionKind,
                 )
             )
         }
         CallNotifications.cancel(getApplication(), offer?.callId)
+        ChatNotifications.cancel(getApplication(), offer?.callId)
         pendingOffer = null
         clearCall("Gotowy")
     }
@@ -229,10 +263,11 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                     from = _state.value.myId,
                     to = remoteId,
                     callId = activeCallId,
+                    sessionKind = activeSessionKind,
                 )
             )
         }
-        clearCall("Rozmowa zakończona")
+        clearCall(if (activeSessionKind == SignalMessage.SESSION_CHAT) "Czat zakończony" else "Rozmowa zakończona")
     }
 
     fun toggleMicrophone() {
@@ -251,7 +286,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     }
 
     fun sendChatMessage(raw: String) {
-        if (_state.value.phase != CallPhase.IN_CALL || !_state.value.chatReady) return
+        if (_state.value.phase !in setOf(CallPhase.IN_CALL, CallPhase.IN_CHAT) || !_state.value.chatReady) return
         val text = EphemeralChatPolicy.sanitize(raw)
         if (text.isBlank()) return
         val message = EphemeralChatMessage(UUID.randomUUID().toString(), text, true, System.currentTimeMillis())
@@ -285,7 +320,13 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         when (message.type) {
             "offer" -> handleOffer(message)
             "answer" -> if (message.callId == activeCallId && message.sdp != null) {
-                _state.update { it.copy(phase = CallPhase.CONNECTING_CALL, status = "Łączenie…") }
+                val chatOnly = activeSessionKind == SignalMessage.SESSION_CHAT
+                _state.update {
+                    it.copy(
+                        phase = if (chatOnly) CallPhase.CONNECTING_CHAT else CallPhase.CONNECTING_CALL,
+                        status = if (chatOnly) "Łączenie szyfrowanego czatu…" else "Łączenie…",
+                    )
+                }
                 webRtcClient.setRemoteDescription(message.sdpType ?: "answer", message.sdp)
             }
             "ice" -> if (message.callId == activeCallId && message.candidate != null) {
@@ -293,8 +334,12 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 if (_state.value.phase == CallPhase.INCOMING) pendingIncomingCandidates += candidate
                 else webRtcClient.addRemoteIceCandidate(candidate)
             }
-            "hangup" -> if (message.callId == activeCallId) clearCall("Rozmówca zakończył rozmowę")
-            "reject" -> if (message.callId == activeCallId) clearCall("Połączenie odrzucone")
+            "hangup" -> if (message.callId == activeCallId) {
+                clearCall(if (activeSessionKind == SignalMessage.SESSION_CHAT) "Rozmówca zakończył czat" else "Rozmówca zakończył rozmowę")
+            }
+            "reject" -> if (message.callId == activeCallId) {
+                clearCall(if (activeSessionKind == SignalMessage.SESSION_CHAT) "Czat odrzucony" else "Połączenie odrzucone")
+            }
             "busy" -> if (message.callId == activeCallId) clearCall("Rozmówca jest zajęty")
             "unavailable" -> if (message.callId == activeCallId) clearCall("Rozmówca jest niedostępny")
         }
@@ -312,6 +357,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 from = _state.value.myId,
                 to = remoteId,
                 callId = activeCallId,
+                sessionKind = activeSessionKind,
                 candidate = candidate.sdp,
                 sdpMid = candidate.sdpMid,
                 sdpMLineIndex = candidate.sdpMLineIndex,
@@ -321,13 +367,22 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
 
     override fun onConnectionStateChanged(connected: Boolean) = onMain {
         if (connected) {
-            _state.update { it.copy(phase = CallPhase.IN_CALL, status = "Połączono") }
+            val chatOnly = activeSessionKind == SignalMessage.SESSION_CHAT
+            _state.update {
+                it.copy(
+                    phase = if (chatOnly) CallPhase.IN_CHAT else CallPhase.IN_CALL,
+                    status = if (chatOnly) "Szyfrowany czat połączony" else "Połączono",
+                    chatVisible = chatOnly || it.chatVisible,
+                )
+            }
             callTimeoutJob?.cancel()
-            val callId = activeCallId
-            val remote = _state.value.remoteName ?: activeRemoteId
-            if (callId != null && remote != null) OngoingCallService.start(getApplication(), remote, callId)
-        } else if (_state.value.phase in listOf(CallPhase.CONNECTING_CALL, CallPhase.IN_CALL)) {
-            clearCall("Połączenie zostało przerwane")
+            if (!chatOnly) {
+                val callId = activeCallId
+                val remote = _state.value.remoteName ?: activeRemoteId
+                if (callId != null && remote != null) OngoingCallService.start(getApplication(), remote, callId)
+            }
+        } else if (_state.value.phase in listOf(CallPhase.CONNECTING_CALL, CallPhase.IN_CALL, CallPhase.CONNECTING_CHAT, CallPhase.IN_CHAT)) {
+            clearCall(if (activeSessionKind == SignalMessage.SESSION_CHAT) "Czat został przerwany" else "Połączenie zostało przerwane")
         }
     }
 
@@ -342,6 +397,13 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
             if (text.isBlank()) null else EphemeralChatMessage(UUID.randomUUID().toString(), text, false, System.currentTimeMillis())
         }.getOrNull() ?: return@onMain
         addChatMessage(parsed)
+        if (!AppVisibility.isForeground && activeSessionKind == SignalMessage.SESSION_CHAT) {
+            ChatNotifications.showMessage(
+                getApplication(),
+                _state.value.remoteName ?: activeRemoteId.orEmpty(),
+                activeCallId,
+            )
+        }
     }
 
     override fun onError(message: String) = onMain { failCall(message) }
@@ -350,7 +412,13 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         val from = message.from ?: return
         if (_state.value.phase != CallPhase.READY) {
             signalingClient.send(
-                SignalMessage(type = "busy", from = _state.value.myId, to = from, callId = message.callId)
+                SignalMessage(
+                    type = "busy",
+                    from = _state.value.myId,
+                    to = from,
+                    callId = message.callId,
+                    sessionKind = message.sessionKind,
+                )
             )
             return
         }
@@ -358,32 +426,43 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         pendingIncomingCandidates.clear()
         activeCallId = message.callId
         activeRemoteId = from
+        activeSessionKind = message.sessionKind
         val contact = _state.value.contacts.firstOrNull { it.id == from }
+        val chatOnly = message.sessionKind == SignalMessage.SESSION_CHAT
         _state.update {
             it.copy(
-                phase = CallPhase.INCOMING,
-                status = "Połączenie przychodzące",
+                phase = if (chatOnly) CallPhase.CONNECTING_CHAT else CallPhase.INCOMING,
+                status = if (chatOnly) "Otwieranie szyfrowanego czatu…" else "Połączenie przychodzące",
                 remoteId = from,
                 remoteName = contact?.name ?: from,
                 callId = message.callId,
                 chatMessages = emptyList(),
                 chatReady = false,
-                chatVisible = false,
+                chatVisible = chatOnly,
             )
         }
-        if (AppVisibility.isForeground) CallNotifications.cancel(getApplication(), message.callId)
+        if (AppVisibility.isForeground) {
+            CallNotifications.cancel(getApplication(), message.callId)
+            ChatNotifications.cancel(getApplication(), message.callId)
+        }
         signalingClient.setBusy(true)
-        startIncomingTimeout(message.callId)
+        if (chatOnly) {
+            acceptOffer(message, withMedia = false)
+        } else {
+            startIncomingTimeout(message.callId)
+        }
     }
 
     private fun failCall(message: String) {
         callTimeoutJob?.cancel()
         signalingClient.setBusy(false)
         CallNotifications.cancel(getApplication(), activeCallId)
+        ChatNotifications.cancel(getApplication(), activeCallId)
         OngoingCallService.stop(getApplication())
         webRtcClient.endCall()
         activeCallId = null
         activeRemoteId = null
+        activeSessionKind = SignalMessage.SESSION_VIDEO
         pendingOffer = null
         pendingIncomingCandidates.clear()
         _state.update {
@@ -404,10 +483,12 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         callTimeoutJob?.cancel()
         signalingClient.setBusy(false)
         CallNotifications.cancel(getApplication(), activeCallId)
+        ChatNotifications.cancel(getApplication(), activeCallId)
         OngoingCallService.stop(getApplication())
         webRtcClient.endCall()
         activeCallId = null
         activeRemoteId = null
+        activeSessionKind = SignalMessage.SESSION_VIDEO
         pendingOffer = null
         pendingIncomingCandidates.clear()
         _state.update {
@@ -438,11 +519,22 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         callTimeoutJob?.cancel()
         callTimeoutJob = viewModelScope.launch {
             delay(CALL_TIMEOUT_MS)
-            if (activeCallId == callId && _state.value.phase in setOf(CallPhase.OUTGOING, CallPhase.CONNECTING_CALL)) {
-                signalingClient.send(
-                    SignalMessage(type = "hangup", from = _state.value.myId, to = remoteId, callId = callId)
+            if (activeCallId == callId && _state.value.phase in setOf(
+                    CallPhase.OUTGOING,
+                    CallPhase.CONNECTING_CALL,
+                    CallPhase.CONNECTING_CHAT,
                 )
-                clearCall("Nie odebrano")
+            ) {
+                signalingClient.send(
+                    SignalMessage(
+                        type = "hangup",
+                        from = _state.value.myId,
+                        to = remoteId,
+                        callId = callId,
+                        sessionKind = activeSessionKind,
+                    )
+                )
+                clearCall(if (activeSessionKind == SignalMessage.SESSION_CHAT) "Nie udało się połączyć czatu" else "Nie odebrano")
             }
         }
     }

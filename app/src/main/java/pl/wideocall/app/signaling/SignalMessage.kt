@@ -7,6 +7,7 @@ data class SignalMessage(
     val from: String? = null,
     val to: String? = null,
     val callId: String? = null,
+    val sessionKind: String = SESSION_VIDEO,
     val sdp: String? = null,
     val sdpType: String? = null,
     val candidate: String? = null,
@@ -19,6 +20,7 @@ data class SignalMessage(
         from?.let { put("from", it) }
         to?.let { put("to", it) }
         callId?.let { put("callId", it) }
+        put("sessionKind", sessionKind)
         sdp?.let { put("sdp", it) }
         sdpType?.let { put("sdpType", it) }
         candidate?.let { put("candidate", it) }
@@ -28,6 +30,9 @@ data class SignalMessage(
     }.toString()
 
     companion object {
+        const val SESSION_VIDEO = "video"
+        const val SESSION_CHAT = "chat"
+
         fun fromJson(raw: String): SignalMessage {
             val json = JSONObject(raw)
             return SignalMessage(
@@ -35,6 +40,7 @@ data class SignalMessage(
                 from = json.optString("from").ifBlank { null },
                 to = json.optString("to").ifBlank { null },
                 callId = json.optString("callId").ifBlank { null },
+                sessionKind = json.optString("sessionKind", SESSION_VIDEO).ifBlank { SESSION_VIDEO },
                 sdp = json.optString("sdp").ifBlank { null },
                 sdpType = json.optString("sdpType").ifBlank { null },
                 candidate = json.optString("candidate").ifBlank { null },

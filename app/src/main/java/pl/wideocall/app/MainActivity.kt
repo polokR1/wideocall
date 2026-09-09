@@ -150,16 +150,19 @@ private fun PermissionGate(
 ) {
     val context = LocalContext.current
     var permissionsGranted by remember { mutableStateOf(hasMediaPermissions(context)) }
-    val launcher = rememberLauncherForActivityResult(
+    val mediaLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { results ->
         permissionsGranted = results[Manifest.permission.CAMERA] == true &&
             results[Manifest.permission.RECORD_AUDIO] == true
     }
+    val notificationLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { }
 
     LaunchedEffect(Unit) {
-        if (!permissionsGranted || !hasNotificationPermission(context)) {
-            launcher.launch(requiredPermissions())
+        if (!hasNotificationPermission(context) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
 
@@ -184,13 +187,15 @@ private fun PermissionGate(
     }
     when (state.phase) {
         CallPhase.INCOMING -> IncomingCallScreen(state, viewModel, permissionsGranted) {
-            launcher.launch(requiredPermissions())
+            mediaLauncher.launch(requiredMediaPermissions())
         }
         CallPhase.OUTGOING,
         CallPhase.CONNECTING_CALL,
         CallPhase.IN_CALL -> VideoCallScreen(state, viewModel)
+        CallPhase.CONNECTING_CHAT,
+        CallPhase.IN_CHAT -> ChatScreen(state, viewModel)
         else -> HomeScreen(state, viewModel, permissionsGranted) {
-            launcher.launch(requiredPermissions())
+            mediaLauncher.launch(requiredMediaPermissions())
         }
     }
 }
@@ -272,12 +277,17 @@ private fun HomeScreen(
                 item { EmptyContactsCard(onAdd = { showAddContact = true }) }
             } else {
                 items(state.contacts, key = { it.id }) { contact ->
+                    val contactAvailable = state.contactPresence[contact.id]
+                        ?.let { !it.busy && (it.online || it.pushReady || it.watchReady) } == true
                     ContactCard(
                         contact = contact,
                         presence = state.contactPresence[contact.id],
-                        callEnabled = state.phase == CallPhase.READY && permissionsGranted &&
-                            state.contactPresence[contact.id]?.let { !it.busy && (it.online || it.pushReady || it.watchReady) } == true,
-                        onCall = { viewModel.call(contact) },
+                        callEnabled = state.phase == CallPhase.READY && contactAvailable,
+                        chatEnabled = state.phase == CallPhase.READY && contactAvailable,
+                        onCall = {
+                            if (permissionsGranted) viewModel.call(contact) else requestPermissions()
+                        },
+                        onChat = { viewModel.startChat(contact) },
                         onDelete = { viewModel.removeContact(contact.id) },
                     )
                 }
@@ -381,7 +391,9 @@ private fun ContactCard(
     contact: Contact,
     presence: ContactPresence?,
     callEnabled: Boolean,
+    chatEnabled: Boolean,
     onCall: () -> Unit,
+    onChat: () -> Unit,
     onDelete: () -> Unit,
 ) {
     val presenceColor = when {
@@ -425,10 +437,66 @@ private fun ContactCard(
                 }
             }
             IconButton(onClick = onDelete) { Icon(Icons.Default.DeleteOutline, "Usuń kontakt", tint = MaterialTheme.colorScheme.onSurfaceVariant) }
+            IconButton(onClick = onChat, enabled = chatEnabled) {
+                Icon(
+                    Icons.AutoMirrored.Filled.Chat,
+                    "Otwórz szyfrowany czat",
+                    tint = if (chatEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
+                )
+            }
             IconButton(onClick = onCall, enabled = callEnabled) {
                 Icon(Icons.Default.Videocam, "Zadzwoń", tint = if (callEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline)
             }
         }
+    }
+}
+
+@Composable
+private fun ChatScreen(state: AppUiState, viewModel: CallViewModel) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .statusBarsPadding()
+            .padding(16.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                Icons.Default.Lock,
+                null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(28.dp),
+            )
+            Column(Modifier.padding(start = 12.dp).weight(1f)) {
+                Text(
+                    state.remoteName ?: state.remoteId.orEmpty(),
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                )
+                Text(
+                    state.status,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            IconButton(onClick = viewModel::hangUp) {
+                Icon(Icons.Default.Close, "Zakończ czat")
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+        EphemeralChatPanel(
+            state = state,
+            onClose = viewModel::hangUp,
+            onSend = viewModel::sendChatMessage,
+            sendEnabled = state.phase == CallPhase.IN_CHAT && state.chatReady,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Spacer(Modifier.height(12.dp))
+        Text(
+            "Treść nie jest zapisywana w bazie. Wiadomości są usuwane z obu ekranów po 60 sekundach.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
@@ -557,6 +625,7 @@ private fun EphemeralChatPanel(
     onClose: () -> Unit,
     onSend: (String) -> Unit,
     modifier: Modifier = Modifier,
+    sendEnabled: Boolean = true,
 ) {
     var text by remember { mutableStateOf("") }
     Card(
@@ -605,6 +674,7 @@ private fun EphemeralChatPanel(
                     value = text,
                     onValueChange = { text = it.take(1_000) },
                     modifier = Modifier.weight(1f),
+                    enabled = sendEnabled,
                     placeholder = { Text("Wiadomość…") },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
@@ -622,7 +692,7 @@ private fun EphemeralChatPanel(
                             text = ""
                         }
                     },
-                    enabled = text.isNotBlank(),
+                    enabled = sendEnabled && text.isNotBlank(),
                 ) {
                     Icon(Icons.AutoMirrored.Filled.Send, "Wyślij", tint = Color.White)
                 }
@@ -771,11 +841,10 @@ private fun hasMediaPermissions(context: Context): Boolean =
     context.checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED &&
         context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
 
-private fun requiredPermissions(): Array<String> = buildList {
+private fun requiredMediaPermissions(): Array<String> = buildList {
     add(Manifest.permission.CAMERA)
     add(Manifest.permission.RECORD_AUDIO)
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) add(Manifest.permission.BLUETOOTH_CONNECT)
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) add(Manifest.permission.POST_NOTIFICATIONS)
 }.toTypedArray()
 
 private fun hasNotificationPermission(context: Context): Boolean =

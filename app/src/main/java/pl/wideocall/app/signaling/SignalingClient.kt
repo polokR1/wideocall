@@ -286,6 +286,7 @@ class SignalingClient(
             "createdAt" to ServerValue.TIMESTAMP,
         )
         message.callId?.let { payload["callId"] = it }
+        payload["sessionKind"] = message.sessionKind
         message.sdp?.let { payload["sdp"] = it }
         message.sdpType?.let { payload["sdpType"] = it }
         message.candidate?.let { payload["candidate"] = it }
@@ -304,6 +305,7 @@ class SignalingClient(
                         callerId = message.from,
                         callId = callId,
                         signalId = signalId,
+                        sessionKind = message.sessionKind,
                     )
                 }
             }
@@ -316,6 +318,7 @@ class SignalingClient(
             from = child("from").getValue(String::class.java),
             to = child("to").getValue(String::class.java),
             callId = child("callId").getValue(String::class.java),
+            sessionKind = child("sessionKind").getValue(String::class.java) ?: SignalMessage.SESSION_VIDEO,
             sdp = child("sdp").getValue(String::class.java),
             sdpType = child("sdpType").getValue(String::class.java),
             candidate = child("candidate").getValue(String::class.java),

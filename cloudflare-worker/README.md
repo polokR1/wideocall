@@ -1,6 +1,6 @@
 # Wideocall notification gateway
 
-Cloudflare Worker sends a high-priority FCM data message only after it verifies a fresh WebRTC offer in Firebase Realtime Database. Video, audio, SDP and chat content do not pass through Cloudflare.
+Cloudflare Worker sends a high-priority FCM data message only after it verifies a fresh WebRTC video or chat offer in Firebase Realtime Database. Video, audio, SDP and chat content do not pass through Cloudflare.
 
 Required Worker secrets:
 
@@ -12,7 +12,7 @@ The service account needs permission to read Realtime Database and to create Fir
 Endpoints:
 
 - `GET /health` — gateway status without exposing secrets.
-- `POST /notify-call` — authenticated call-wake request from the Android app.
+- `POST /notify-call` — authenticated video/chat wake request from the Android app. `sessionKind` is limited to `video` or `chat`.
 
 Local checks:
 

@@ -8,21 +8,27 @@ import java.net.URL
 import java.util.concurrent.Executors
 import javax.net.ssl.HttpsURLConnection
 
-/** Sends only call identifiers to the trusted push gateway after Firebase accepted the offer. */
+/** Sends only session identifiers to the trusted push gateway after Firebase accepted the offer. */
 object CallWakeGateway {
     private const val TAG = "CallWakeGateway"
     private val executor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "call-wake-gateway").apply { isDaemon = true }
     }
 
-    fun notifyIncomingCall(recipientId: String, callerId: String, callId: String, signalId: String) {
+    fun notifyIncomingCall(
+        recipientId: String,
+        callerId: String,
+        callId: String,
+        signalId: String,
+        sessionKind: String,
+    ) {
         if (!BuildConfig.FCM_ENABLED || BuildConfig.CALL_WAKE_URL.isBlank()) return
         val user = FirebaseAuth.getInstance().currentUser ?: return
         user.getIdToken(false)
             .addOnSuccessListener { result ->
                 val idToken = result.token ?: return@addOnSuccessListener
                 executor.execute {
-                    postNotification(idToken, recipientId, callerId, callId, signalId)
+                    postNotification(idToken, recipientId, callerId, callId, signalId, sessionKind)
                 }
             }
             .addOnFailureListener { error -> Log.w(TAG, "Firebase ID token unavailable", error) }
@@ -34,6 +40,7 @@ object CallWakeGateway {
         callerId: String,
         callId: String,
         signalId: String,
+        sessionKind: String,
     ) {
         val connection = runCatching {
             (URL(BuildConfig.CALL_WAKE_URL).openConnection() as HttpsURLConnection).apply {
@@ -49,6 +56,7 @@ object CallWakeGateway {
                     .put("callerId", callerId)
                     .put("callId", callId)
                     .put("signalId", signalId)
+                    .put("sessionKind", sessionKind)
                     .toString()
                 outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
             }

@@ -122,15 +122,21 @@ class CallWatcherService : Service() {
                 when (type) {
                     "offer" -> {
                         val callerId = snapshot.child("from").getValue(String::class.java) ?: return
+                        val sessionKind = snapshot.child("sessionKind").getValue(String::class.java) ?: "video"
                         if (callId == null || age > OFFER_MAX_AGE_MS) {
                             snapshot.ref.removeValue()
                             return
                         }
-                        CallNotifications.showIncoming(this@CallWatcherService, callerId, callId)
+                        if (sessionKind == "chat") {
+                            ChatNotifications.showInvitation(this@CallWatcherService, callerId, callId)
+                        } else {
+                            CallNotifications.showIncoming(this@CallWatcherService, callerId, callId)
+                        }
                         handler.postDelayed({ expireOffer(snapshot.ref, callId) }, OFFER_MAX_AGE_MS - age)
                     }
                     "hangup", "reject" -> if (callId != null) {
                         CallNotifications.cancel(this@CallWatcherService, callId)
+                        ChatNotifications.cancel(this@CallWatcherService, callId)
                         cleanCallSignals(callId)
                     }
                 }
@@ -148,6 +154,7 @@ class CallWatcherService : Service() {
             if (snapshot.child("callId").getValue(String::class.java) == callId) reference.removeValue()
         }
         CallNotifications.cancel(this, callId)
+        ChatNotifications.cancel(this, callId)
     }
 
     private fun cleanCallSignals(callId: String) {

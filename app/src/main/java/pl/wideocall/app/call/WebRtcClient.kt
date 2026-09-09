@@ -66,6 +66,7 @@ class WebRtcClient(
     private val queuedRemoteCandidates = CopyOnWriteArrayList<IceCandidate>()
     private var remoteDescriptionSet = false
     private var frontCamera = true
+    private var mediaEnabled = false
 
     init {
         PeerConnectionFactory.initialize(
@@ -80,10 +81,12 @@ class WebRtcClient(
             .createPeerConnectionFactory()
     }
 
-    fun prepareCall(isCaller: Boolean) {
+    fun prepareSession(isCaller: Boolean, withMedia: Boolean) {
         closePeerConnection()
+        stopLocalMedia()
         remoteDescriptionSet = false
-        startLocalMedia()
+        mediaEnabled = withMedia
+        if (withMedia) startLocalMedia()
 
         val iceServers = listOf(
             PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer()
@@ -137,8 +140,10 @@ class WebRtcClient(
             peerConnection?.addTrack(track, listOf(STREAM_ID))?.let(::configureVideoSender)
         }
         localAudioTrack?.let { peerConnection?.addTrack(it, listOf(STREAM_ID)) }
-        peerConnection?.setBitrate(MIN_VIDEO_BITRATE_BPS, START_VIDEO_BITRATE_BPS, MAX_VIDEO_BITRATE_BPS)
-        configureAudio()
+        if (withMedia) {
+            peerConnection?.setBitrate(MIN_VIDEO_BITRATE_BPS, START_VIDEO_BITRATE_BPS, MAX_VIDEO_BITRATE_BPS)
+            configureAudio()
+        }
     }
 
     fun createOffer(onReady: (SessionDescription) -> Unit) {
@@ -219,7 +224,8 @@ class WebRtcClient(
         bindLocalRenderer(null)
         closePeerConnection()
         stopLocalMedia()
-        restoreAudio()
+        if (mediaEnabled) restoreAudio()
+        mediaEnabled = false
     }
 
     fun release() {
@@ -335,8 +341,8 @@ class WebRtcClient(
     }
 
     private fun offerAnswerConstraints() = MediaConstraints().apply {
-        mandatory += MediaConstraints.KeyValuePair("OfferToReceiveAudio", "true")
-        mandatory += MediaConstraints.KeyValuePair("OfferToReceiveVideo", "true")
+        mandatory += MediaConstraints.KeyValuePair("OfferToReceiveAudio", mediaEnabled.toString())
+        mandatory += MediaConstraints.KeyValuePair("OfferToReceiveVideo", mediaEnabled.toString())
     }
 
     private fun createCameraCapturer(): CameraVideoCapturer {

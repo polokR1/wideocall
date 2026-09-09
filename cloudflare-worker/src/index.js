@@ -71,10 +71,11 @@ async function notifyIncomingCall(request, env) {
         message: {
           token: device.token,
           data: {
-            type: "incoming_call",
+            type: (body.sessionKind || "video") === "chat" ? "incoming_chat" : "incoming_call",
             callerId: body.callerId,
             recipientId: body.recipientId,
             callId: body.callId,
+            sessionKind: body.sessionKind || "video",
           },
           android: {
             priority: "HIGH",
@@ -95,6 +96,7 @@ export function validateCallRequest(body) {
   if (!USER_ID.test(body.callerId || "")) return "invalid_caller_id";
   if (!CALL_ID.test(body.callId || "")) return "invalid_call_id";
   if (!SIGNAL_ID.test(body.signalId || "")) return "invalid_signal_id";
+  if (!["video", "chat"].includes(body.sessionKind || "video")) return "invalid_session_kind";
   if (body.recipientId === body.callerId) return "cannot_call_self";
   return null;
 }
@@ -106,6 +108,7 @@ export function isMatchingFreshOffer(signal, body, authenticatedUid, now = Date.
     signal.from === body.callerId &&
     signal.to === body.recipientId &&
     signal.callId === body.callId &&
+    (signal.sessionKind || "video") === (body.sessionKind || "video") &&
     signal.senderUid === authenticatedUid &&
     createdAt > 0 &&
     Math.abs(now - createdAt) <= OFFER_MAX_AGE_MS;

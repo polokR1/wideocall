@@ -7,6 +7,7 @@ const body = {
   callerId: "WXYZ-4567",
   callId: "ab12cd34-ef56-7890-ab12-cd34ef567890",
   signalId: "-Oabc_DEF123456789",
+  sessionKind: "video",
 };
 
 test("accepts a valid notification request", () => {
@@ -16,6 +17,7 @@ test("accepts a valid notification request", () => {
 test("rejects invalid identifiers and self calls", () => {
   assert.equal(validateCallRequest({ ...body, recipientId: "bad" }), "invalid_recipient_id");
   assert.equal(validateCallRequest({ ...body, recipientId: body.callerId }), "cannot_call_self");
+  assert.equal(validateCallRequest({ ...body, sessionKind: "message" }), "invalid_session_kind");
 });
 
 test("requires a fresh offer owned by the authenticated Firebase user", () => {
@@ -25,10 +27,19 @@ test("requires a fresh offer owned by the authenticated Firebase user", () => {
     from: body.callerId,
     to: body.recipientId,
     callId: body.callId,
+    sessionKind: body.sessionKind,
     senderUid: "firebase-uid",
     createdAt: now - 1_000,
   };
   assert.equal(isMatchingFreshOffer(signal, body, "firebase-uid", now), true);
   assert.equal(isMatchingFreshOffer(signal, body, "other-uid", now), false);
+  assert.equal(isMatchingFreshOffer({ ...signal, sessionKind: "chat" }, body, "firebase-uid", now), false);
   assert.equal(isMatchingFreshOffer({ ...signal, createdAt: now - 61_000 }, body, "firebase-uid", now), false);
+});
+
+test("accepts chat invitations and keeps legacy video requests compatible", () => {
+  assert.equal(validateCallRequest({ ...body, sessionKind: "chat" }), null);
+  const legacyBody = { ...body };
+  delete legacyBody.sessionKind;
+  assert.equal(validateCallRequest(legacyBody), null);
 });

@@ -14,11 +14,16 @@ class WideocallMessagingService : FirebaseMessagingService() {
     override fun onMessageReceived(message: RemoteMessage) {
         if (!BuildConfig.FCM_ENABLED) return
         val data = message.data
-        if (data["type"] != "incoming_call") return
+        val type = data["type"] ?: return
+        if (type !in setOf("incoming_call", "incoming_chat")) return
         val callerId = data["callerId"] ?: return
         val recipientId = data["recipientId"] ?: return
         val callId = data["callId"] ?: return
         if (recipientId != AppPreferences(this).myId || AppVisibility.isForeground) return
-        CallNotifications.showIncoming(this, callerId, callId)
+        if (type == "incoming_chat") {
+            ChatNotifications.showInvitation(this, callerId, callId)
+        } else {
+            CallNotifications.showIncoming(this, callerId, callId)
+        }
     }
 }
