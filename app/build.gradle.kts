@@ -13,9 +13,14 @@ android {
         applicationId = "pl.wideocall.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 6
-        versionName = "0.4.2"
-        buildConfigField("boolean", "FCM_ENABLED", "false")
+        versionCode = 7
+        versionName = "0.5.0"
+        buildConfigField("boolean", "FCM_ENABLED", "true")
+        buildConfigField(
+            "String",
+            "CALL_WAKE_URL",
+            "\"https://wideocall-notify.wideocall-polokr1.workers.dev/notify-call\"",
+        )
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true

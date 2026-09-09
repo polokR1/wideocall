@@ -14,3 +14,7 @@ signaling-server/.env
 .firebase-cli
 functions/node_modules
 functions/.firebase
+cloudflare-worker/.dev.vars
+cloudflare-worker/.wrangler
+*service-account*.json
+*firebase-adminsdk*.json

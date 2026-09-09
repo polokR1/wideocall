@@ -8,8 +8,9 @@ Prywatny wideotelefon na Androida: rozmowy wideo i audio 1:1 oraz znikające wia
 - Firebase Realtime Database przekazuje wyłącznie krótkotrwałe dane sygnalizacyjne SDP/ICE oraz status dostępności.
 - Firebase Authentication anonimowo wiąże lokalny identyfikator z instalacją aplikacji.
 - Użytkownik nie zakłada konta i nie loguje się przez Google, e-mail ani hasło; aplikacja pokazuje wyłącznie prosty identyfikator `XXXX-XXXX`.
-- Bezpłatna usługa czuwania utrzymuje nasłuch Realtime Database w tle i pokazuje stałe, ciche powiadomienie systemowe.
-- Firebase Cloud Messaging i funkcja `notifyIncomingCall` pozostają przygotowaną, opcjonalną drogą na przyszłość; obecna wersja nie wymaga planu Blaze.
+- Firebase Cloud Messaging wybudza aplikację powiadomieniem o połączeniu, również gdy jej ekran nie jest otwarty.
+- Bezpłatny Cloudflare Worker `wideocall-notify` uwierzytelnia dzwoniący telefon, sprawdza świeżą ofertę w Realtime Database i wysyła przez FCM wyłącznie identyfikatory połączenia.
+- Opcjonalna usługa czuwania Realtime Database pozostaje zapasową drogą odbioru i pokazuje stałe, ciche powiadomienie systemowe.
 - Wiadomości czatu są przesyłane zaszyfrowanym kanałem WebRTC DataChannel, istnieją wyłącznie w pamięci urządzeń i znikają po 60 sekundach.
 - Nazwy i lista kontaktów pozostają tylko na telefonie.
 
@@ -17,7 +18,7 @@ Prywatny wideotelefon na Androida: rozmowy wideo i audio 1:1 oraz znikające wia
 
 Projekt korzysta z Firebase `vidcall-88857`. Logowanie anonimowe jest włączone, baza Realtime Database działa w regionie `europe-west1`, a `app/google-services.json` zawiera jej adres. Reguły zostały zweryfikowane testem zapisu obecności oraz wysłania, odczytu i usunięcia sygnału.
 
-Reguły obecności, statusu czuwania, prywatnych tokenów urządzeń i sygnalizacji są wdrożone. Funkcja `notifyIncomingCall` jest gotowa w katalogu `functions/`, ale nie jest wdrożona, ponieważ wymaga planu Firebase Blaze. Nie jest potrzebna do działania bezpłatnego czuwania w wersji 0.4.2.
+Reguły obecności, statusu czuwania, prywatnych tokenów urządzeń i sygnalizacji są wdrożone. Funkcja `notifyIncomingCall` w katalogu `functions/` jest niewdrożonym wariantem dla planu Firebase Blaze; wersja 0.5.0 używa zamiast niej bezpłatnego Cloudflare Workera.
 
 Po każdej zmianie reguł lub funkcji należy wdrożyć odpowiednią część projektu:
 
@@ -31,9 +32,17 @@ Nie należy pozostawiać produkcyjnej bazy w publicznym trybie testowym. Reguły
 
 ## Czuwanie w tle
 
-Czuwanie jest domyślnie włączone i można je wyłączyć w ustawieniach aplikacji albo akcją w stałym powiadomieniu `Wideocall czuwa`. Uruchamia się po pierwszym otwarciu aplikacji i ponownie po restarcie telefonu. Kontakt widzi wtedy status `Czuwanie aktywne`, nawet gdy ekran główny Wideocall nie jest otwarty.
+FCM jest uruchamiane automatycznie po pierwszym otwarciu aplikacji. Token telefonu jest prywatny w Realtime Database, a Cloudflare Worker odczytuje go dopiero po zweryfikowaniu anonimowej tożsamości Firebase i świeżej oferty połączenia. Powiadomienie ma wysoki priorytet i otwiera ekran połączenia przychodzącego.
+
+Zapasowe czuwanie jest domyślnie włączone i można je wyłączyć w ustawieniach aplikacji albo akcją w stałym powiadomieniu `Wideocall czuwa`. Uruchamia się po pierwszym otwarciu aplikacji i ponownie po restarcie telefonu.
 
 To rozwiązanie nie wymaga konta użytkownika, logowania przez Google ani płatnych Cloud Functions. Firebase Authentication działa anonimowo i niewidocznie wyłącznie jako zabezpieczenie przypisania identyfikatora `XXXX-XXXX` do instalacji.
+
+## Cloudflare Worker
+
+Kod bramki znajduje się w `cloudflare-worker/`. Produkcyjny Worker działa pod adresem `https://wideocall-notify.wideocall-polokr1.workers.dev`. W Cloudflare są wymagane dwa zaszyfrowane sekrety: `FIREBASE_WEB_API_KEY` oraz `FIREBASE_SERVICE_ACCOUNT_JSON`. Prywatny klucz konta usługi nie może znajdować się w repozytorium ani w APK; odpowiadające mu wzorce są blokowane przez `.gitignore`.
+
+Endpoint `POST /notify-call` nie przyjmuje obrazu, dźwięku, SDP ani treści czatu. Żądanie zawiera tylko identyfikator dzwoniącego, odbiorcy, połączenia i zapisanej oferty. Worker odrzuca żądania bez poprawnego tokenu Firebase lub pasującej, świeżej oferty.
 
 ## Budowanie Androida
 
@@ -51,7 +60,8 @@ APK zostanie utworzony w `app/build/outputs/apk/debug/app-debug.apk`.
 - lokalna książka kontaktów,
 - status kontaktu: dostępny, czuwanie aktywne, dostępny przez powiadomienie, zajęty lub offline,
 - sygnalizacja rozmowy przez Firebase,
-- bezpłatne czuwanie w tle ze stałym, cichym powiadomieniem,
+- wybudzanie telefonu przez FCM i bezpłatny Cloudflare Worker,
+- zapasowe czuwanie w tle ze stałym, cichym powiadomieniem,
 - systemowe powiadomienie połączenia przychodzącego przy zamkniętym ekranie aplikacji,
 - połączenie WebRTC 1:1,
 - szyfrowany czat P2P bez bazy i bez historii, z czasem życia wiadomości 60 sekund,
@@ -62,7 +72,7 @@ APK zostanie utworzony w `app/build/outputs/apk/debug/app-debug.apk`.
 ## Ograniczenia przed wersją produkcyjną
 
 - Czuwanie nie działa, gdy telefon jest wyłączony, bez internetu albo aplikacja została wymuszenie zatrzymana w ustawieniach systemu; po wymuszonym zatrzymaniu trzeba ponownie otworzyć Wideocall.
-- Tryby oszczędzania baterii i mechanizmy niektórych producentów mogą zatrzymać usługę mimo stałego powiadomienia. Na takich telefonach trzeba wyłączyć optymalizację baterii dla Wideocall.
+- Tryby oszczędzania baterii i mechanizmy niektórych producentów mogą opóźnić powiadomienie albo zatrzymać zapasową usługę. Na takich telefonach może być potrzebne wyłączenie optymalizacji baterii dla Wideocall.
 - Pełnoekranowe połączenie przychodzące zależy od zgody systemowej i ustawień producenta telefonu; zawsze pozostaje powiadomienie typu rozmowa.
 - Projekt korzysta z publicznego STUN Google. Część sieci komórkowych i restrykcyjnych routerów wymaga serwera TURN.
 - Reguły ograniczają dostęp do sygnalizacji, ale przed publicznym wydaniem należy dodać Firebase App Check i limity antyspamowe.

@@ -11,6 +11,7 @@ import com.google.firebase.database.ServerValue
 import com.google.firebase.database.ValueEventListener
 import pl.wideocall.app.auth.AnonymousFirebaseAuth
 import pl.wideocall.app.notifications.PushTokenRegistry
+import pl.wideocall.app.notifications.CallWakeGateway
 import pl.wideocall.app.notifications.AppVisibility
 import pl.wideocall.app.BuildConfig
 
@@ -292,8 +293,21 @@ class SignalingClient(
         message.sdpMLineIndex?.let { payload["sdpMLineIndex"] = it }
         message.reason?.let { payload["reason"] = it }
 
-        database?.reference?.child(SIGNALS_PATH)?.child(recipientId)?.push()?.setValue(payload)
-            ?.addOnFailureListener { error -> reportDisconnected("Nie udało się wysłać danych połączenia", error) }
+        val signalReference = database?.reference?.child(SIGNALS_PATH)?.child(recipientId)?.push() ?: return
+        val signalId = signalReference.key ?: return
+        signalReference.setValue(payload)
+            .addOnSuccessListener {
+                if (message.type == "offer") {
+                    val callId = message.callId ?: return@addOnSuccessListener
+                    CallWakeGateway.notifyIncomingCall(
+                        recipientId = recipientId,
+                        callerId = message.from,
+                        callId = callId,
+                        signalId = signalId,
+                    )
+                }
+            }
+            .addOnFailureListener { error -> reportDisconnected("Nie udało się wysłać danych połączenia", error) }
     }
 
     private fun DataSnapshot.toSignalMessage(): SignalMessage? = runCatching {

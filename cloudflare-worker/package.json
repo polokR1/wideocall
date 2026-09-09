@@ -1,0 +1,8 @@
+{
+  "name": "wideocall-notify-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  }
+}
