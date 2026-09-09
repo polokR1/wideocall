@@ -17,7 +17,7 @@ Prywatny wideotelefon na Androida: rozmowy wideo i audio 1:1 oraz znikające wia
 
 Projekt korzysta z Firebase `vidcall-88857`. Logowanie anonimowe jest włączone, baza Realtime Database działa w regionie `europe-west1`, a `app/google-services.json` zawiera jej adres. Reguły zostały zweryfikowane testem zapisu obecności oraz wysłania, odczytu i usunięcia sygnału.
 
-Reguły obecności, statusu czuwania, prywatnych tokenów urządzeń i sygnalizacji są wdrożone. Funkcja `notifyIncomingCall` jest gotowa w katalogu `functions/`, ale nie jest wdrożona, ponieważ wymaga planu Firebase Blaze. Nie jest potrzebna do działania bezpłatnego czuwania w wersji 0.4.1.
+Reguły obecności, statusu czuwania, prywatnych tokenów urządzeń i sygnalizacji są wdrożone. Funkcja `notifyIncomingCall` jest gotowa w katalogu `functions/`, ale nie jest wdrożona, ponieważ wymaga planu Firebase Blaze. Nie jest potrzebna do działania bezpłatnego czuwania w wersji 0.4.2.
 
 Po każdej zmianie reguł lub funkcji należy wdrożyć odpowiednią część projektu:
 
@@ -56,7 +56,7 @@ APK zostanie utworzony w `app/build/outputs/apk/debug/app-debug.apk`.
 - połączenie WebRTC 1:1,
 - szyfrowany czat P2P bez bazy i bez historii, z czasem życia wiadomości 60 sekund,
 - sprzętowe kodowanie wideo, jeśli obsługuje je telefon,
-- automatyczne dopasowanie bitrate,
+- automatyczne dopasowanie bitrate w zakresie 150–1500 kb/s z priorytetem płynności obrazu,
 - wyciszanie mikrofonu, zmiana kamery i kończenie rozmowy.
 
 ## Ograniczenia przed wersją produkcyjną

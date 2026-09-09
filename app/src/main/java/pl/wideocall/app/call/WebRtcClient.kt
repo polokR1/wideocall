@@ -19,6 +19,8 @@ import org.webrtc.MediaStream
 import org.webrtc.PeerConnection
 import org.webrtc.PeerConnectionFactory
 import org.webrtc.RtpReceiver
+import org.webrtc.RtpParameters
+import org.webrtc.RtpSender
 import org.webrtc.RtpTransceiver
 import org.webrtc.SdpObserver
 import org.webrtc.SessionDescription
@@ -131,8 +133,11 @@ class WebRtcClient(
             peerConnection?.createDataChannel(CHAT_CHANNEL, init)?.let(::bindDataChannel)
         }
 
-        localVideoTrack?.let { peerConnection?.addTrack(it, listOf(STREAM_ID)) }
+        localVideoTrack?.let { track ->
+            peerConnection?.addTrack(track, listOf(STREAM_ID))?.let(::configureVideoSender)
+        }
         localAudioTrack?.let { peerConnection?.addTrack(it, listOf(STREAM_ID)) }
+        peerConnection?.setBitrate(MIN_VIDEO_BITRATE_BPS, START_VIDEO_BITRATE_BPS, MAX_VIDEO_BITRATE_BPS)
         configureAudio()
     }
 
@@ -301,6 +306,17 @@ class WebRtcClient(
         listener.onChatReadyChanged(channel.state() == DataChannel.State.OPEN)
     }
 
+    private fun configureVideoSender(sender: RtpSender) {
+        val parameters = sender.parameters
+        parameters.degradationPreference = RtpParameters.DegradationPreference.MAINTAIN_FRAMERATE
+        parameters.encodings.forEach { encoding ->
+            encoding.minBitrateBps = MIN_VIDEO_BITRATE_BPS
+            encoding.maxBitrateBps = MAX_VIDEO_BITRATE_BPS
+            encoding.maxFramerate = VIDEO_FPS
+        }
+        sender.setParameters(parameters)
+    }
+
     private fun attachRemoteTrack(track: org.webrtc.MediaStreamTrack?) {
         val videoTrack = track as? VideoTrack ?: return
         remoteVideoTrack?.let { old -> remoteRenderer?.let(old::removeSink) }
@@ -369,5 +385,9 @@ class WebRtcClient(
     companion object {
         private const val STREAM_ID = "wideocall"
         private const val CHAT_CHANNEL = "ephemeral-chat"
+        private const val VIDEO_FPS = 30
+        private const val MIN_VIDEO_BITRATE_BPS = 150_000
+        private const val START_VIDEO_BITRATE_BPS = 800_000
+        private const val MAX_VIDEO_BITRATE_BPS = 1_500_000
     }
 }
