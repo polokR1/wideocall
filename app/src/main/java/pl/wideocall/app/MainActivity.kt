@@ -13,6 +13,7 @@ import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
@@ -30,6 +31,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -67,6 +69,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
@@ -110,16 +113,31 @@ private data class NotificationAction(val action: String, val callId: String)
 class MainActivity : ComponentActivity() {
     private val viewModel: CallViewModel by viewModels()
     private val notificationAction = MutableStateFlow<NotificationAction?>(null)
+    private val fullScreenIntentAllowed = MutableStateFlow(true)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+        refreshFullScreenIntentPermission()
         captureNotificationAction(intent)
         setContent {
             WideocallTheme {
                 val action by notificationAction.collectAsState()
-                PermissionGate(viewModel, action) { notificationAction.value = null }
+                val fullScreenAllowed by fullScreenIntentAllowed.collectAsState()
+                PermissionGate(
+                    viewModel = viewModel,
+                    notificationAction = action,
+                    fullScreenIntentAllowed = fullScreenAllowed,
+                    requestFullScreenIntent = { CallNotifications.openFullScreenIntentSettings(this) },
+                    consumeNotificationAction = { notificationAction.value = null },
+                )
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        refreshFullScreenIntentPermission()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -131,7 +149,11 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         viewModel.refreshPreferences()
-        if (AppPreferences(this).watchEnabled) CallWatcherService.start(this)
+        if (AppPreferences(this).watchEnabled) {
+            CallWatcherService.start(this)
+        } else {
+            CallWatcherService.stop(this)
+        }
     }
 
     private fun captureNotificationAction(intent: Intent?) {
@@ -140,12 +162,18 @@ class MainActivity : ComponentActivity() {
         val callId = intent.getStringExtra(CallNotifications.EXTRA_CALL_ID) ?: return
         notificationAction.value = NotificationAction(action, callId)
     }
+
+    private fun refreshFullScreenIntentPermission() {
+        fullScreenIntentAllowed.value = CallNotifications.canUseFullScreenIntent(this)
+    }
 }
 
 @Composable
 private fun PermissionGate(
     viewModel: CallViewModel,
     notificationAction: NotificationAction?,
+    fullScreenIntentAllowed: Boolean,
+    requestFullScreenIntent: () -> Unit,
     consumeNotificationAction: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -194,9 +222,14 @@ private fun PermissionGate(
         CallPhase.IN_CALL -> VideoCallScreen(state, viewModel)
         CallPhase.CONNECTING_CHAT,
         CallPhase.IN_CHAT -> ChatScreen(state, viewModel)
-        else -> HomeScreen(state, viewModel, permissionsGranted) {
-            mediaLauncher.launch(requiredMediaPermissions())
-        }
+        else -> HomeScreen(
+            state = state,
+            viewModel = viewModel,
+            permissionsGranted = permissionsGranted,
+            fullScreenIntentAllowed = fullScreenIntentAllowed,
+            requestFullScreenIntent = requestFullScreenIntent,
+            requestPermissions = { mediaLauncher.launch(requiredMediaPermissions()) },
+        )
     }
 }
 
@@ -206,6 +239,8 @@ private fun HomeScreen(
     state: AppUiState,
     viewModel: CallViewModel,
     permissionsGranted: Boolean,
+    fullScreenIntentAllowed: Boolean,
+    requestFullScreenIntent: () -> Unit,
     requestPermissions: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -252,6 +287,9 @@ private fun HomeScreen(
         ) {
             item {
                 StatusCard(state, onReconnect = viewModel::connect)
+            }
+            if (!fullScreenIntentAllowed) {
+                item { FullScreenCallCard(requestFullScreenIntent) }
             }
             item {
                 MyIdCard(state.myId) {
@@ -369,6 +407,22 @@ private fun PermissionCard(onRequest: () -> Unit) {
 }
 
 @Composable
+private fun FullScreenCallCard(onRequest: () -> Unit) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+        Column(Modifier.fillMaxWidth().padding(16.dp)) {
+            Text("Włącz ekran połączeń przychodzących", fontWeight = FontWeight.SemiBold)
+            Text(
+                "Android blokuje automatyczne pokazanie ekranu rozmowy. Bez tej zgody usłyszysz dzwonek, ale zobaczysz tylko powiadomienie.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            TextButton(onClick = onRequest, modifier = Modifier.align(Alignment.End)) {
+                Text("Otwórz ustawienia")
+            }
+        }
+    }
+}
+
+@Composable
 private fun EmptyContactsCard(onAdd: () -> Unit) {
     Column(
         modifier = Modifier
@@ -458,6 +512,8 @@ private fun ChatScreen(state: AppUiState, viewModel: CallViewModel) {
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
             .statusBarsPadding()
+            .navigationBarsPadding()
+            .imePadding()
             .padding(16.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -550,7 +606,7 @@ private fun IncomingCallScreen(
 
 @Composable
 private fun VideoCallScreen(state: AppUiState, viewModel: CallViewModel) {
-    Box(Modifier.fillMaxSize().background(Color.Black)) {
+    Box(Modifier.fillMaxSize().background(Color.Black).imePadding()) {
         VideoSurface(
             modifier = Modifier.fillMaxSize(),
             eglContext = viewModel.eglContext(),
@@ -629,7 +685,7 @@ private fun EphemeralChatPanel(
 ) {
     var text by remember { mutableStateOf("") }
     Card(
-        modifier = modifier.fillMaxWidth().heightIn(max = 360.dp).imePadding(),
+        modifier = modifier.fillMaxWidth().heightIn(max = 360.dp),
         colors = CardDefaults.cardColors(containerColor = Color(0xEE101820)),
     ) {
         Column(Modifier.padding(12.dp)) {
@@ -676,6 +732,17 @@ private fun EphemeralChatPanel(
                     modifier = Modifier.weight(1f),
                     enabled = sendEnabled,
                     placeholder = { Text("Wiadomość…") },
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White,
+                        disabledTextColor = Color.White.copy(alpha = .55f),
+                        focusedBorderColor = Color(0xFF62E6A7),
+                        unfocusedBorderColor = Color.White.copy(alpha = .45f),
+                        disabledBorderColor = Color.White.copy(alpha = .25f),
+                        focusedPlaceholderColor = Color.White.copy(alpha = .55f),
+                        unfocusedPlaceholderColor = Color.White.copy(alpha = .55f),
+                        cursorColor = Color(0xFF62E6A7),
+                    ),
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                     keyboardActions = KeyboardActions(onSend = {
@@ -814,9 +881,9 @@ private fun SettingsDialog(state: AppUiState, onDismiss: () -> Unit, onSave: (St
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(Modifier.weight(1f)) {
-                        Text("Czuwanie w tle", fontWeight = FontWeight.SemiBold)
+                        Text("Zapasowe czuwanie", fontWeight = FontWeight.SemiBold)
                         Text(
-                            "Stałe, ciche powiadomienie pozwala odbierać połączenia po zamknięciu aplikacji.",
+                            "Opcjonalne. Włącz tylko wtedy, gdy producent telefonu opóźnia zwykłe powiadomienia FCM. Powoduje stałe, ciche powiadomienie.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )

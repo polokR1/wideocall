@@ -42,7 +42,7 @@ data class AppUiState(
     val myId: String,
     val displayName: String,
     val contacts: List<Contact>,
-    val watchEnabled: Boolean = true,
+    val watchEnabled: Boolean = false,
     val contactPresence: Map<String, ContactPresence> = emptyMap(),
     val phase: CallPhase = CallPhase.CONNECTING_SERVER,
     val status: String = "Łączenie…",

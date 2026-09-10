@@ -51,6 +51,11 @@ class CallWatcherService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
+        if (!AppPreferences(this).watchEnabled) {
+            intentionallyStopped = true
+            stopSelf()
+            return START_NOT_STICKY
+        }
         if (signalListener == null) connect()
         return START_STICKY
     }

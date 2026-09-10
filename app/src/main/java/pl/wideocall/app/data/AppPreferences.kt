@@ -13,6 +13,15 @@ data class Contact(
 class AppPreferences(context: Context) {
     private val preferences = context.getSharedPreferences("wideocall", Context.MODE_PRIVATE)
 
+    init {
+        if (!preferences.getBoolean(KEY_PUSH_ONLY_MIGRATION, false)) {
+            preferences.edit()
+                .putBoolean(KEY_WATCH_ENABLED, false)
+                .putBoolean(KEY_PUSH_ONLY_MIGRATION, true)
+                .apply()
+        }
+    }
+
     val myId: String
         get() {
             val existing = preferences.getString(KEY_MY_ID, null)
@@ -25,7 +34,7 @@ class AppPreferences(context: Context) {
         set(value) = preferences.edit().putString(KEY_DISPLAY_NAME, value.trim()).apply()
 
     var watchEnabled: Boolean
-        get() = preferences.getBoolean(KEY_WATCH_ENABLED, true)
+        get() = preferences.getBoolean(KEY_WATCH_ENABLED, false)
         set(value) = preferences.edit().putBoolean(KEY_WATCH_ENABLED, value).apply()
 
     fun contacts(): List<Contact> {
@@ -70,6 +79,7 @@ class AppPreferences(context: Context) {
         private const val KEY_DISPLAY_NAME = "display_name"
         private const val KEY_CONTACTS = "contacts"
         private const val KEY_WATCH_ENABLED = "watch_enabled"
+        private const val KEY_PUSH_ONLY_MIGRATION = "push_only_migration_v1"
         private const val ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
         private val random = SecureRandom()
 
