@@ -1,15 +1,18 @@
 package pl.wideocall.app
 
 import android.Manifest
+import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.RingtoneManager
 import android.os.Build
 import android.os.Bundle
+import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -195,6 +198,9 @@ private fun PermissionGate(
     }
 
     val state by viewModel.state.collectAsState()
+    SecureChatWindow(
+        enabled = state.phase in setOf(CallPhase.CONNECTING_CHAT, CallPhase.IN_CHAT) || state.chatVisible,
+    )
     LaunchedEffect(notificationAction, state.phase, state.callId, permissionsGranted) {
         val action = notificationAction ?: return@LaunchedEffect
         if (action.callId != state.callId) return@LaunchedEffect
@@ -231,6 +237,27 @@ private fun PermissionGate(
             requestPermissions = { mediaLauncher.launch(requiredMediaPermissions()) },
         )
     }
+}
+
+@Composable
+private fun SecureChatWindow(enabled: Boolean) {
+    val activity = LocalContext.current.findActivity()
+    DisposableEffect(activity, enabled) {
+        if (enabled) {
+            activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        }
+        onDispose {
+            if (enabled) {
+                activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            }
+        }
+    }
+}
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

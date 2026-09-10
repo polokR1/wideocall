@@ -11,7 +11,7 @@ import pl.wideocall.app.MainActivity
 import pl.wideocall.app.R
 
 object ChatNotifications {
-    private const val CHANNEL_ID = "encrypted_chat"
+    private const val CHANNEL_ID = "encrypted_chat_secret_v2"
     private const val ID_OFFSET = 31_337
 
     fun createChannel(context: Context) {
@@ -22,7 +22,7 @@ object ChatNotifications {
                 NotificationManager.IMPORTANCE_HIGH,
             ).apply {
                 description = "Zaproszenia i nowe wiadomości znikającego czatu"
-                lockscreenVisibility = Notification.VISIBILITY_PRIVATE
+                lockscreenVisibility = Notification.VISIBILITY_SECRET
             }
         )
     }
@@ -72,7 +72,7 @@ object ChatNotifications {
             .setContentIntent(open)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setVisibility(NotificationCompat.VISIBILITY_SECRET)
             .setAutoCancel(true)
             .setTimeoutAfter(timeoutMs)
             .build()

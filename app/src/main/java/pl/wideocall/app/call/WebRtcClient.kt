@@ -304,6 +304,7 @@ class WebRtcClient(
             override fun onMessage(buffer: DataChannel.Buffer) {
                 if (buffer.binary) return
                 val source = buffer.data.slice()
+                if (source.remaining() !in 1..MAX_CHAT_PAYLOAD_BYTES) return
                 val bytes = ByteArray(source.remaining())
                 source.get(bytes)
                 listener.onChatMessage(String(bytes, StandardCharsets.UTF_8))
@@ -395,5 +396,6 @@ class WebRtcClient(
         private const val MIN_VIDEO_BITRATE_BPS = 150_000
         private const val START_VIDEO_BITRATE_BPS = 800_000
         private const val MAX_VIDEO_BITRATE_BPS = 1_500_000
+        private const val MAX_CHAT_PAYLOAD_BYTES = 4_096
     }
 }

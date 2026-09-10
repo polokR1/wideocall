@@ -12,13 +12,15 @@ Prywatny wideotelefon na Androida: rozmowy wideo i audio 1:1 oraz znikające wia
 - Bezpłatny Cloudflare Worker `wideocall-notify` uwierzytelnia telefon inicjujący sesję, sprawdza świeżą ofertę w Realtime Database i wysyła przez FCM wyłącznie identyfikatory sesji.
 - Opcjonalna, domyślnie wyłączona usługa czuwania Realtime Database pozostaje zapasową drogą odbioru i pokazuje stałe, ciche powiadomienie systemowe tylko po ręcznym włączeniu.
 - Osobny czat nie uruchamia kamery ani mikrofonu. Wiadomości są przesyłane zaszyfrowanym kanałem WebRTC DataChannel, istnieją wyłącznie w pamięci urządzeń i znikają po 60 sekundach.
+- Podczas wyświetlania czatu Android blokuje zrzuty i nagrywanie ekranu oraz ukrywa podgląd aplikacji na ekranie ostatnich aplikacji.
+- Kopie zapasowe i transfer danych aplikacji na nowe urządzenie są wyłączone, a aplikacja nie zezwala na nieszyfrowane połączenia HTTP.
 - Nazwy i lista kontaktów pozostają tylko na telefonie.
 
 ## Konfiguracja Firebase
 
 Projekt korzysta z Firebase `vidcall-88857`. Logowanie anonimowe jest włączone, baza Realtime Database działa w regionie `europe-west1`, a `app/google-services.json` zawiera jej adres. Reguły zostały zweryfikowane testem zapisu obecności oraz wysłania, odczytu i usunięcia sygnału.
 
-Reguły obecności, statusu czuwania, prywatnych tokenów urządzeń i sygnalizacji są wdrożone. Funkcja `notifyIncomingCall` w katalogu `functions/` jest niewdrożonym wariantem dla planu Firebase Blaze; wersja 0.6.1 używa zamiast niej bezpłatnego Cloudflare Workera.
+Reguły obecności, statusu czuwania, prywatnych tokenów urządzeń i sygnalizacji są wdrożone. Funkcja `notifyIncomingCall` w katalogu `functions/` jest niewdrożonym wariantem dla planu Firebase Blaze; wersja 0.7.0 używa zamiast niej bezpłatnego Cloudflare Workera.
 
 Po każdej zmianie reguł lub funkcji należy wdrożyć odpowiednią część projektu:
 
@@ -65,6 +67,8 @@ APK zostanie utworzony w `app/build/outputs/apk/debug/app-debug.apk`.
 - systemowe powiadomienie połączenia przychodzącego przy zamkniętym ekranie aplikacji,
 - połączenie WebRTC 1:1,
 - osobny szyfrowany czat P2P bez kamery, mikrofonu, bazy i historii, z czasem życia wiadomości 60 sekund,
+- ochrona ekranu czatu przed systemowymi zrzutami i nagrywaniem oraz całkowicie ukryte powiadomienia czatu na ekranie blokady,
+- wyłączone kopie zapasowe danych i nieszyfrowany ruch sieciowy,
 - sprzętowe kodowanie wideo, jeśli obsługuje je telefon,
 - automatyczne dopasowanie bitrate w zakresie 150–1500 kb/s z priorytetem płynności obrazu,
 - wyciszanie mikrofonu, zmiana kamery i kończenie rozmowy.
@@ -76,6 +80,7 @@ APK zostanie utworzony w `app/build/outputs/apk/debug/app-debug.apk`.
 - Pełnoekranowe połączenie przychodzące zależy od zgody systemowej i ustawień producenta telefonu; zawsze pozostaje powiadomienie typu rozmowa.
 - Projekt korzysta z publicznego STUN Google. Część sieci komórkowych i restrykcyjnych routerów wymaga serwera TURN.
 - Wiadomości nie są kolejkowane offline: odbiorca musi otworzyć zaproszenie, zanim oferta sesji wygaśnie. Dostarczenie po dłuższym czasie wymagałoby przechowania zaszyfrowanej treści na serwerze.
+- Systemowa blokada zrzutu ekranu nie chroni przed zdjęciem ekranu drugim urządzeniem ani przed zmodyfikowanym lub przejętym systemem Android.
 - WebRTC szyfruje transport DataChannel (DTLS), ale aplikacja nie ma jeszcze weryfikacji tożsamości rozmówcy kodem bezpieczeństwa znanej z komunikatorów klasy Signal.
 - Reguły ograniczają dostęp do sygnalizacji, ale przed publicznym wydaniem należy dodać Firebase App Check i limity antyspamowe.
 - Konieczne są testy na dwóch fizycznych telefonach w Wi-Fi, LTE i 5G.

@@ -13,8 +13,8 @@ android {
         applicationId = "pl.wideocall.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 9
-        versionName = "0.6.1"
+        versionCode = 10
+        versionName = "0.7.0"
         buildConfigField("boolean", "FCM_ENABLED", "true")
         buildConfigField(
             "String",
@@ -57,7 +57,8 @@ android {
 
 dependencies {
     val composeBom = platform("androidx.compose:compose-bom:2025.01.00")
-    // BoM 34.12.0 includes fixed Auth 24.0.1 and Database 22.0.1 without the later Kotlin 2.3 build requirement.
+    // Nowsze BoM-y zawierają Auth z metadanymi Kotlin 2.3; 34.12.0 jest ostatnią
+    // sprawdzoną wersją zgodną z obecną linią Kotlin 2.1 tego projektu.
     val firebaseBom = platform("com.google.firebase:firebase-bom:34.12.0")
     implementation(composeBom)
     androidTestImplementation(composeBom)
@@ -79,7 +80,7 @@ dependencies {
     implementation("com.google.firebase:firebase-auth")
     implementation("com.google.firebase:firebase-database")
     implementation("com.google.firebase:firebase-messaging")
-    implementation("io.github.webrtc-sdk:android:144.7559.14")
+    implementation("io.github.webrtc-sdk:android:144.7559.15")
 
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
