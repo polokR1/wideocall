@@ -12,7 +12,7 @@ Prywatny wideotelefon na Androida: rozmowy wideo i audio 1:1 oraz znikające wia
 - Bezpłatny Cloudflare Worker `wideocall-notify` uwierzytelnia telefon inicjujący sesję, sprawdza świeżą ofertę w Realtime Database i wysyła przez FCM wyłącznie identyfikatory sesji.
 - Opcjonalna, domyślnie wyłączona usługa czuwania Realtime Database pozostaje zapasową drogą odbioru i pokazuje stałe, ciche powiadomienie systemowe tylko po ręcznym włączeniu.
 - Osobny czat nie uruchamia kamery ani mikrofonu. Wiadomości są przesyłane zaszyfrowanym kanałem WebRTC DataChannel, istnieją wyłącznie w pamięci urządzeń i znikają po 60 sekundach.
-- Podczas wyświetlania czatu Android blokuje zrzuty i nagrywanie ekranu oraz ukrywa podgląd aplikacji na ekranie ostatnich aplikacji.
+- Podczas wyświetlania czatu Android blokuje zrzuty i nagrywanie ekranu oraz ukrywa podgląd aplikacji na ekranie ostatnich aplikacji. Na Androidzie 12+ aplikacja blokuje też nakładki innych aplikacji.
 - Kopie zapasowe i transfer danych aplikacji na nowe urządzenie są wyłączone, a aplikacja nie zezwala na nieszyfrowane połączenia HTTP.
 - Nazwy i lista kontaktów pozostają tylko na telefonie.
 
@@ -67,7 +67,7 @@ APK zostanie utworzony w `app/build/outputs/apk/debug/app-debug.apk`.
 - systemowe powiadomienie połączenia przychodzącego przy zamkniętym ekranie aplikacji,
 - połączenie WebRTC 1:1,
 - osobny szyfrowany czat P2P bez kamery, mikrofonu, bazy i historii, z czasem życia wiadomości 60 sekund,
-- ochrona ekranu czatu przed systemowymi zrzutami i nagrywaniem oraz całkowicie ukryte powiadomienia czatu na ekranie blokady,
+- ochrona ekranu czatu przed systemowymi zrzutami i nagrywaniem, obcymi nakładkami oraz całkowicie ukryte powiadomienia czatu na ekranie blokady,
 - wyłączone kopie zapasowe danych i nieszyfrowany ruch sieciowy,
 - sprzętowe kodowanie wideo, jeśli obsługuje je telefon,
 - automatyczne dopasowanie bitrate w zakresie 150–1500 kb/s z priorytetem płynności obrazu,
