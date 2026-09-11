@@ -1,5 +1,6 @@
 package pl.wideocall.app.notifications
 
+import android.annotation.SuppressLint
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -38,6 +39,7 @@ class OngoingCallService : Service() {
             ContextCompat.startForegroundService(context, intent)
         }
 
+        @SuppressLint("ImplicitSamInstance") // stopService matches the explicit service component, not object identity.
         fun stop(context: Context) {
             context.stopService(Intent(context, OngoingCallService::class.java))
         }

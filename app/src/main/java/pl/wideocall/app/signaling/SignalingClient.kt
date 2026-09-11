@@ -14,6 +14,7 @@ import pl.wideocall.app.notifications.PushTokenRegistry
 import pl.wideocall.app.notifications.CallWakeGateway
 import pl.wideocall.app.notifications.AppVisibility
 import pl.wideocall.app.BuildConfig
+import pl.wideocall.app.security.IdentityKeyManager
 
 data class ContactPresence(
     val online: Boolean = false,
@@ -100,7 +101,13 @@ class SignalingClient(
                     val busy = snapshot.child("busy").getValue(Boolean::class.java) == true
                     if (busy) {
                         listener.onMessage(
-                            SignalMessage(type = "busy", from = recipientId, to = currentUserId, callId = message.callId)
+                            SignalMessage(
+                                type = "busy",
+                                from = recipientId,
+                                to = currentUserId,
+                                callId = message.callId,
+                                localOnly = true,
+                            )
                         )
                     } else if (online || pushReady || watchReady) {
                         enqueue(message, currentUid)
@@ -111,6 +118,7 @@ class SignalingClient(
                                 from = recipientId,
                                 to = currentUserId,
                                 callId = message.callId,
+                                localOnly = true,
                             )
                         )
                     }
@@ -278,21 +286,34 @@ class SignalingClient(
 
     private fun enqueue(message: SignalMessage, uid: String) {
         val recipientId = message.to ?: return
+        val callerId = message.from ?: return
+        val signedMessage = runCatching {
+            val publicKey = IdentityKeyManager.publicKeyBase64()
+            message.copy(
+                identityKey = publicKey,
+                signature = IdentityKeyManager.sign(message.signingPayload(publicKey)),
+            )
+        }.getOrElse {
+            reportDisconnected("Nie udało się podpisać danych połączenia")
+            return
+        }
         val payload = mutableMapOf<String, Any>(
-            "type" to message.type,
-            "from" to (message.from ?: return),
+            "type" to signedMessage.type,
+            "from" to callerId,
             "to" to recipientId,
             "senderUid" to uid,
             "createdAt" to ServerValue.TIMESTAMP,
         )
-        message.callId?.let { payload["callId"] = it }
-        payload["sessionKind"] = message.sessionKind
-        message.sdp?.let { payload["sdp"] = it }
-        message.sdpType?.let { payload["sdpType"] = it }
-        message.candidate?.let { payload["candidate"] = it }
-        message.sdpMid?.let { payload["sdpMid"] = it }
-        message.sdpMLineIndex?.let { payload["sdpMLineIndex"] = it }
-        message.reason?.let { payload["reason"] = it }
+        signedMessage.callId?.let { payload["callId"] = it }
+        payload["sessionKind"] = signedMessage.sessionKind
+        signedMessage.sdp?.let { payload["sdp"] = it }
+        signedMessage.sdpType?.let { payload["sdpType"] = it }
+        signedMessage.candidate?.let { payload["candidate"] = it }
+        signedMessage.sdpMid?.let { payload["sdpMid"] = it }
+        signedMessage.sdpMLineIndex?.let { payload["sdpMLineIndex"] = it }
+        signedMessage.reason?.let { payload["reason"] = it }
+        payload["identityKey"] = signedMessage.identityKey ?: return
+        payload["signature"] = signedMessage.signature ?: return
 
         val signalReference = database?.reference?.child(SIGNALS_PATH)?.child(recipientId)?.push() ?: return
         val signalId = signalReference.key ?: return
@@ -302,7 +323,7 @@ class SignalingClient(
                     val callId = message.callId ?: return@addOnSuccessListener
                     CallWakeGateway.notifyIncomingCall(
                         recipientId = recipientId,
-                        callerId = message.from,
+                        callerId = callerId,
                         callId = callId,
                         signalId = signalId,
                         sessionKind = message.sessionKind,
@@ -325,6 +346,8 @@ class SignalingClient(
             sdpMid = child("sdpMid").getValue(String::class.java),
             sdpMLineIndex = child("sdpMLineIndex").getValue(Long::class.java)?.toInt(),
             reason = child("reason").getValue(String::class.java),
+            identityKey = child("identityKey").getValue(String::class.java),
+            signature = child("signature").getValue(String::class.java),
         )
     }.getOrNull()
 

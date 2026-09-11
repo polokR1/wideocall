@@ -7,19 +7,24 @@ plugins {
 
 android {
     namespace = "pl.wideocall.app"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "pl.wideocall.app"
         minSdk = 26
-        targetSdk = 35
-        versionCode = 10
-        versionName = "0.7.0"
+        targetSdk = 36
+        versionCode = 11
+        versionName = "0.8.0"
         buildConfigField("boolean", "FCM_ENABLED", "true")
         buildConfigField(
             "String",
             "CALL_WAKE_URL",
             "\"https://wideocall-notify.wideocall-polokr1.workers.dev/notify-call\"",
+        )
+        buildConfigField(
+            "String",
+            "TURN_CREDENTIALS_URL",
+            "\"https://wideocall-notify.wideocall-polokr1.workers.dev/turn-credentials\"",
         )
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -70,6 +75,7 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-process:2.8.7")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.8.7")
+    implementation("androidx.core:core-telecom:1.0.1")
 
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
@@ -78,6 +84,7 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
 
     implementation("com.google.firebase:firebase-auth")
+    implementation("com.google.firebase:firebase-appcheck-playintegrity")
     implementation("com.google.firebase:firebase-database")
     implementation("com.google.firebase:firebase-messaging")
     implementation("io.github.webrtc-sdk:android:144.7559.15")

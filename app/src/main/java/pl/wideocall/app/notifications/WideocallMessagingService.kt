@@ -4,6 +4,7 @@ import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
 import pl.wideocall.app.data.AppPreferences
 import pl.wideocall.app.BuildConfig
+import pl.wideocall.app.call.TelecomCallBridge
 
 class WideocallMessagingService : FirebaseMessagingService() {
     override fun onNewToken(token: String) {
@@ -23,6 +24,7 @@ class WideocallMessagingService : FirebaseMessagingService() {
         if (type == "incoming_chat") {
             ChatNotifications.showInvitation(this, callerId, callId)
         } else {
+            TelecomCallBridge.registerIncoming(callId, callerId)
             CallNotifications.showIncoming(this, callerId, callId)
         }
     }

@@ -19,6 +19,9 @@ object CallNotifications {
     const val ACTION_ANSWER = "pl.wideocall.app.ANSWER_CALL"
     const val ACTION_DECLINE = "pl.wideocall.app.DECLINE_CALL"
     const val ACTION_HANG_UP = "pl.wideocall.app.HANG_UP"
+    const val ACTION_TELECOM_ANSWER = "pl.wideocall.app.TELECOM_ANSWER_CALL"
+    const val ACTION_TELECOM_DECLINE = "pl.wideocall.app.TELECOM_DECLINE_CALL"
+    const val ACTION_TELECOM_HANG_UP = "pl.wideocall.app.TELECOM_HANG_UP"
     private const val ACTION_SHOW_INCOMING = "pl.wideocall.app.SHOW_INCOMING_CALL"
     const val EXTRA_CALL_ID = "call_id"
     const val EXTRA_CALLER_ID = "caller_id"
@@ -99,6 +102,10 @@ object CallNotifications {
     fun cancel(context: Context, callId: String?) {
         if (callId == null) return
         context.getSystemService(NotificationManager::class.java).cancel(notificationId(callId))
+    }
+
+    fun dispatchAction(context: Context, action: String, callerId: String, callId: String) {
+        runCatching { callIntent(context, action, callerId, callId, 60).send() }
     }
 
     fun ongoingNotification(context: Context, callerId: String, callId: String): android.app.Notification {

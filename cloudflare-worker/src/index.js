@@ -5,6 +5,8 @@ const CALL_ID = /^[A-Za-z0-9_-]{8,128}$/;
 const SIGNAL_ID = /^[A-Za-z0-9_-]{10,128}$/;
 const MAX_BODY_BYTES = 4096;
 const OFFER_MAX_AGE_MS = 60_000;
+const TURN_TTL_SECONDS = 24 * 60 * 60;
+const TURN_URL = /^(?:stun:stun\.cloudflare\.com(?::\d+)?|turns?:turn\.cloudflare\.com(?::\d+)?(?:\?transport=(?:udp|tcp))?)$/;
 
 let cachedAccessToken = null;
 
@@ -12,7 +14,25 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/health") {
-      return json({ ok: true, configured: hasConfiguration(env) });
+      return json({
+        ok: true,
+        configured: hasConfiguration(env),
+        turnConfigured: hasTurnConfiguration(env),
+      });
+    }
+    if (request.method === "POST" && url.pathname === "/turn-credentials") {
+      if (!hasConfiguration(env) || !hasTurnConfiguration(env)) {
+        return json({ error: "turn_not_configured" }, 503);
+      }
+      try {
+        return await issueTurnCredentials(request, env);
+      } catch (error) {
+        console.error(JSON.stringify({
+          event: "turn_credentials_failed",
+          error: error instanceof Error ? error.name : "unknown",
+        }));
+        return json({ error: "turn_gateway_error" }, 502);
+      }
     }
     if (request.method !== "POST" || url.pathname !== "/notify-call") {
       return json({ error: "not_found" }, 404);
@@ -31,17 +51,49 @@ export default {
   },
 };
 
+async function issueTurnCredentials(request, env) {
+  const bearer = readBearer(request.headers.get("authorization"));
+  if (!bearer) return json({ error: "unauthorized" }, 401);
+  const appCheckToken = readAppCheckToken(request.headers.get("x-firebase-appcheck"));
+
+  const firebaseUser = await verifyFirebaseIdToken(bearer, env.FIREBASE_WEB_API_KEY, appCheckToken);
+  if (!firebaseUser?.localId) return json({ error: "unauthorized" }, 401);
+
+  const response = await fetch(
+    `https://rtc.live.cloudflare.com/v1/turn/keys/${encodeURIComponent(env.TURN_KEY_ID)}/credentials/generate-ice-servers`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${env.TURN_KEY_API_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        ttl: TURN_TTL_SECONDS,
+      }),
+    },
+  );
+  if (response.status !== 201) throw new Error(`TURN_${response.status}`);
+
+  const normalized = normalizeTurnResponse(await response.json());
+  if (!normalized) throw new Error("INVALID_TURN_RESPONSE");
+  return json({
+    iceServers: normalized,
+    expiresAt: Date.now() + TURN_TTL_SECONDS * 1000,
+  });
+}
+
 async function notifyIncomingCall(request, env) {
   const contentLength = Number(request.headers.get("content-length") || "0");
   if (contentLength > MAX_BODY_BYTES) return json({ error: "payload_too_large" }, 413);
 
   const bearer = readBearer(request.headers.get("authorization"));
   if (!bearer) return json({ error: "unauthorized" }, 401);
+  const appCheckToken = readAppCheckToken(request.headers.get("x-firebase-appcheck"));
   const body = await readBody(request);
   const validationError = validateCallRequest(body);
   if (validationError) return json({ error: validationError }, 400);
 
-  const firebaseUser = await verifyFirebaseIdToken(bearer, env.FIREBASE_WEB_API_KEY);
+  const firebaseUser = await verifyFirebaseIdToken(bearer, env.FIREBASE_WEB_API_KEY, appCheckToken);
   if (!firebaseUser) return json({ error: "unauthorized" }, 401);
 
   const credentials = parseServiceAccount(env.FIREBASE_SERVICE_ACCOUNT_JSON);
@@ -119,9 +171,43 @@ function hasConfiguration(env) {
     typeof env.FIREBASE_SERVICE_ACCOUNT_JSON === "string" && env.FIREBASE_SERVICE_ACCOUNT_JSON.length > 100;
 }
 
+function hasTurnConfiguration(env) {
+  return typeof env.TURN_KEY_ID === "string" && /^[A-Za-z0-9_-]{16,128}$/.test(env.TURN_KEY_ID) &&
+    typeof env.TURN_KEY_API_TOKEN === "string" && env.TURN_KEY_API_TOKEN.length >= 32;
+}
+
+export function normalizeTurnResponse(payload) {
+  if (!payload || !Array.isArray(payload.iceServers)) return null;
+  const normalized = [];
+  for (const server of payload.iceServers.slice(0, 8)) {
+    const rawUrls = Array.isArray(server?.urls) ? server.urls : [server?.urls];
+    const urls = rawUrls.filter((url) => typeof url === "string" && TURN_URL.test(url)).slice(0, 8);
+    if (urls.length === 0) continue;
+    const isTurn = urls.some((url) => url.startsWith("turn:") || url.startsWith("turns:"));
+    if (isTurn) {
+      if (typeof server.username !== "string" || server.username.length < 20 || server.username.length > 512) continue;
+      if (typeof server.credential !== "string" || server.credential.length < 20 || server.credential.length > 512) continue;
+      normalized.push({ urls, username: server.username, credential: server.credential });
+    } else {
+      normalized.push({ urls });
+    }
+  }
+  return normalized.some((server) => server.username) ? normalized : null;
+}
+
 function readBearer(value) {
   const match = /^Bearer ([A-Za-z0-9._-]{20,4096})$/.exec(value || "");
   return match?.[1] || null;
+}
+
+function readAppCheckToken(value) {
+  return /^[A-Za-z0-9._-]{20,4096}$/.test(value || "") ? value : null;
+}
+
+export function firebaseLookupHeaders(appCheckToken) {
+  const headers = { "Content-Type": "application/json" };
+  if (readAppCheckToken(appCheckToken)) headers["X-Firebase-AppCheck"] = appCheckToken;
+  return headers;
 }
 
 async function readBody(request) {
@@ -154,12 +240,12 @@ async function readBody(request) {
   }
 }
 
-async function verifyFirebaseIdToken(idToken, apiKey) {
+async function verifyFirebaseIdToken(idToken, apiKey, appCheckToken) {
   const response = await fetch(
     `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(apiKey)}`,
     {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: firebaseLookupHeaders(appCheckToken),
       body: JSON.stringify({ idToken }),
     },
   );

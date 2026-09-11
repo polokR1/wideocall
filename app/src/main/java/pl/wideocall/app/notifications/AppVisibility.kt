@@ -1,9 +1,12 @@
 package pl.wideocall.app.notifications
 
+import android.annotation.SuppressLint
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 
+@SuppressLint("StaticFieldLeak") // This singleton stores application context only, never an Activity.
 object AppVisibility : DefaultLifecycleObserver {
+    @SuppressLint("StaticFieldLeak") // Only context.applicationContext is retained for process presence updates.
     private var context: android.content.Context? = null
 
     fun initialize(context: android.content.Context) {

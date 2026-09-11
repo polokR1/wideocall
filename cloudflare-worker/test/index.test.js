@@ -1,6 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isMatchingFreshOffer, validateCallRequest } from "../src/index.js";
+import {
+  firebaseLookupHeaders,
+  isMatchingFreshOffer,
+  normalizeTurnResponse,
+  validateCallRequest,
+} from "../src/index.js";
 
 const body = {
   recipientId: "ABCD-EF23",
@@ -42,4 +47,40 @@ test("accepts chat invitations and keeps legacy video requests compatible", () =
   const legacyBody = { ...body };
   delete legacyBody.sessionKind;
   assert.equal(validateCallRequest(legacyBody), null);
+});
+
+test("accepts only Cloudflare STUN and authenticated TURN servers", () => {
+  const result = normalizeTurnResponse({
+    iceServers: [
+      { urls: ["stun:stun.cloudflare.com:3478", "stun:attacker.example:3478"] },
+      {
+        urls: [
+          "turn:turn.cloudflare.com:3478?transport=udp",
+          "turns:turn.cloudflare.com:443?transport=tcp",
+          "turn:attacker.example:3478?transport=udp",
+        ],
+        username: "a".repeat(32),
+        credential: "b".repeat(64),
+      },
+    ],
+  });
+  assert.deepEqual(result, [
+    { urls: ["stun:stun.cloudflare.com:3478"] },
+    {
+      urls: [
+        "turn:turn.cloudflare.com:3478?transport=udp",
+        "turns:turn.cloudflare.com:443?transport=tcp",
+      ],
+      username: "a".repeat(32),
+      credential: "b".repeat(64),
+    },
+  ]);
+  assert.equal(normalizeTurnResponse({ iceServers: [{ urls: "stun:stun.cloudflare.com:3478" }] }), null);
+});
+
+test("forwards only a syntactically valid App Check token to Firebase Auth", () => {
+  const token = `header.${"a".repeat(32)}.signature`;
+  assert.equal(firebaseLookupHeaders(token)["X-Firebase-AppCheck"], token);
+  assert.equal(firebaseLookupHeaders("bad token")["X-Firebase-AppCheck"], undefined);
+  assert.equal(firebaseLookupHeaders(null)["X-Firebase-AppCheck"], undefined);
 });

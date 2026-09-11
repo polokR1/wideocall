@@ -1,6 +1,8 @@
 package pl.wideocall.app.signaling
 
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
+import java.io.DataOutputStream
 
 data class SignalMessage(
     val type: String,
@@ -14,6 +16,9 @@ data class SignalMessage(
     val sdpMid: String? = null,
     val sdpMLineIndex: Int? = null,
     val reason: String? = null,
+    val identityKey: String? = null,
+    val signature: String? = null,
+    val localOnly: Boolean = false,
 ) {
     fun toJson(): String = JSONObject().apply {
         put("type", type)
@@ -27,7 +32,35 @@ data class SignalMessage(
         sdpMid?.let { put("sdpMid", it) }
         sdpMLineIndex?.let { put("sdpMLineIndex", it) }
         reason?.let { put("reason", it) }
+        identityKey?.let { put("identityKey", it) }
+        signature?.let { put("signature", it) }
     }.toString()
+
+    fun signingPayload(publicKey: String): ByteArray {
+        val output = ByteArrayOutputStream()
+        DataOutputStream(output).use { data ->
+            listOf(
+                "wideocall-signaling-v1",
+                type,
+                from.orEmpty(),
+                to.orEmpty(),
+                callId.orEmpty(),
+                sessionKind,
+                sdp.orEmpty(),
+                sdpType.orEmpty(),
+                candidate.orEmpty(),
+                sdpMid.orEmpty(),
+                sdpMLineIndex?.toString().orEmpty(),
+                reason.orEmpty(),
+                publicKey,
+            ).forEach { value ->
+                val bytes = value.toByteArray(Charsets.UTF_8)
+                data.writeInt(bytes.size)
+                data.write(bytes)
+            }
+        }
+        return output.toByteArray()
+    }
 
     companion object {
         const val SESSION_VIDEO = "video"
@@ -47,6 +80,8 @@ data class SignalMessage(
                 sdpMid = json.optString("sdpMid").ifBlank { null },
                 sdpMLineIndex = if (json.has("sdpMLineIndex")) json.optInt("sdpMLineIndex") else null,
                 reason = json.optString("reason").ifBlank { null },
+                identityKey = json.optString("identityKey").ifBlank { null },
+                signature = json.optString("signature").ifBlank { null },
             )
         }
     }

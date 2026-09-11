@@ -1,9 +1,9 @@
 package pl.wideocall.app.notifications
 
 import android.util.Log
-import com.google.firebase.auth.FirebaseAuth
 import org.json.JSONObject
 import pl.wideocall.app.BuildConfig
+import pl.wideocall.app.auth.FirebaseBackendAuth
 import java.net.URL
 import java.util.concurrent.Executors
 import javax.net.ssl.HttpsURLConnection
@@ -23,19 +23,26 @@ object CallWakeGateway {
         sessionKind: String,
     ) {
         if (!BuildConfig.FCM_ENABLED || BuildConfig.CALL_WAKE_URL.isBlank()) return
-        val user = FirebaseAuth.getInstance().currentUser ?: return
-        user.getIdToken(false)
-            .addOnSuccessListener { result ->
-                val idToken = result.token ?: return@addOnSuccessListener
+        FirebaseBackendAuth.get { tokens ->
+            if (tokens != null) {
                 executor.execute {
-                    postNotification(idToken, recipientId, callerId, callId, signalId, sessionKind)
+                    postNotification(
+                        tokens.idToken,
+                        tokens.appCheckToken,
+                        recipientId,
+                        callerId,
+                        callId,
+                        signalId,
+                        sessionKind,
+                    )
                 }
             }
-            .addOnFailureListener { error -> Log.w(TAG, "Firebase ID token unavailable", error) }
+        }
     }
 
     private fun postNotification(
         idToken: String,
+        appCheckToken: String?,
         recipientId: String,
         callerId: String,
         callId: String,
@@ -49,6 +56,7 @@ object CallWakeGateway {
                 readTimeout = 10_000
                 doOutput = true
                 setRequestProperty("Authorization", "Bearer $idToken")
+                appCheckToken?.let { setRequestProperty("X-Firebase-AppCheck", it) }
                 setRequestProperty("Content-Type", "application/json; charset=utf-8")
                 setRequestProperty("Accept", "application/json")
                 val body = JSONObject()

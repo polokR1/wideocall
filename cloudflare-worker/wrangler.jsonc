@@ -9,6 +9,11 @@
     "head_sampling_rate": 1
   },
   "secrets": {
-    "required": ["FIREBASE_WEB_API_KEY", "FIREBASE_SERVICE_ACCOUNT_JSON"]
+    "required": [
+      "FIREBASE_WEB_API_KEY",
+      "FIREBASE_SERVICE_ACCOUNT_JSON",
+      "TURN_KEY_ID",
+      "TURN_KEY_API_TOKEN"
+    ]
   }
 }

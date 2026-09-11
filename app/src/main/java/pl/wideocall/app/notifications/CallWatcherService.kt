@@ -1,5 +1,6 @@
 package pl.wideocall.app.notifications
 
+import android.annotation.SuppressLint
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -24,6 +25,7 @@ import com.google.firebase.database.ServerValue
 import pl.wideocall.app.MainActivity
 import pl.wideocall.app.R
 import pl.wideocall.app.auth.AnonymousFirebaseAuth
+import pl.wideocall.app.call.TelecomCallBridge
 import pl.wideocall.app.data.AppPreferences
 
 class CallWatcherService : Service() {
@@ -135,11 +137,13 @@ class CallWatcherService : Service() {
                         if (sessionKind == "chat") {
                             ChatNotifications.showInvitation(this@CallWatcherService, callerId, callId)
                         } else {
+                            TelecomCallBridge.registerIncoming(callId, callerId)
                             CallNotifications.showIncoming(this@CallWatcherService, callerId, callId)
                         }
                         handler.postDelayed({ expireOffer(snapshot.ref, callId) }, OFFER_MAX_AGE_MS - age)
                     }
                     "hangup", "reject" -> if (callId != null) {
+                        TelecomCallBridge.disconnectRemote(callId)
                         CallNotifications.cancel(this@CallWatcherService, callId)
                         ChatNotifications.cancel(this@CallWatcherService, callId)
                         cleanCallSignals(callId)
@@ -160,6 +164,7 @@ class CallWatcherService : Service() {
         }
         CallNotifications.cancel(this, callId)
         ChatNotifications.cancel(this, callId)
+        TelecomCallBridge.disconnectMissed(callId)
     }
 
     private fun cleanCallSignals(callId: String) {
@@ -254,6 +259,7 @@ class CallWatcherService : Service() {
             }
         }
 
+        @SuppressLint("ImplicitSamInstance") // stopService matches the explicit service component, not object identity.
         fun stop(context: Context) {
             context.stopService(Intent(context, CallWatcherService::class.java))
         }

@@ -120,6 +120,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        configureLockedScreen()
         enableEdgeToEdge()
         refreshFullScreenIntentPermission()
         captureNotificationAction(intent)
@@ -135,6 +136,19 @@ class MainActivity : ComponentActivity() {
                     consumeNotificationAction = { notificationAction.value = null },
                 )
             }
+        }
+    }
+
+    private fun configureLockedScreen() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+        } else {
+            @Suppress("DEPRECATION")
+            window.addFlags(
+                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON,
+            )
         }
     }
 
@@ -161,7 +175,15 @@ class MainActivity : ComponentActivity() {
 
     private fun captureNotificationAction(intent: Intent?) {
         val action = intent?.action ?: return
-        if (action !in setOf(CallNotifications.ACTION_ANSWER, CallNotifications.ACTION_DECLINE, CallNotifications.ACTION_HANG_UP)) return
+        if (action !in setOf(
+                CallNotifications.ACTION_ANSWER,
+                CallNotifications.ACTION_DECLINE,
+                CallNotifications.ACTION_HANG_UP,
+                CallNotifications.ACTION_TELECOM_ANSWER,
+                CallNotifications.ACTION_TELECOM_DECLINE,
+                CallNotifications.ACTION_TELECOM_HANG_UP,
+            )
+        ) return
         val callId = intent.getStringExtra(CallNotifications.EXTRA_CALL_ID) ?: return
         notificationAction.value = NotificationAction(action, callId)
     }
@@ -192,7 +214,7 @@ private fun PermissionGate(
     ) { }
 
     LaunchedEffect(Unit) {
-        if (!hasNotificationPermission(context) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        if (!hasNotificationPermission(context)) {
             notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
@@ -209,12 +231,24 @@ private fun PermissionGate(
                 viewModel.acceptIncomingCall()
                 consumeNotificationAction()
             }
+            CallNotifications.ACTION_TELECOM_ANSWER -> if (state.phase == CallPhase.INCOMING && permissionsGranted) {
+                viewModel.acceptIncomingCallFromTelecom()
+                consumeNotificationAction()
+            }
             CallNotifications.ACTION_DECLINE -> if (state.phase == CallPhase.INCOMING) {
                 viewModel.rejectIncomingCall()
                 consumeNotificationAction()
             }
+            CallNotifications.ACTION_TELECOM_DECLINE -> if (state.phase == CallPhase.INCOMING) {
+                viewModel.rejectIncomingCallFromTelecom()
+                consumeNotificationAction()
+            }
             CallNotifications.ACTION_HANG_UP -> if (state.phase in setOf(CallPhase.OUTGOING, CallPhase.CONNECTING_CALL, CallPhase.IN_CALL)) {
                 viewModel.hangUp()
+                consumeNotificationAction()
+            }
+            CallNotifications.ACTION_TELECOM_HANG_UP -> if (state.phase in setOf(CallPhase.OUTGOING, CallPhase.CONNECTING_CALL, CallPhase.IN_CALL)) {
+                viewModel.hangUpFromTelecom()
                 consumeNotificationAction()
             }
         }
@@ -567,6 +601,12 @@ private fun ChatScreen(state: AppUiState, viewModel: CallViewModel) {
             }
         }
         Spacer(Modifier.height(12.dp))
+        SecurityCodePanel(
+            state = state,
+            onVerified = viewModel::markCurrentPeerVerified,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Spacer(Modifier.height(12.dp))
         EphemeralChatPanel(
             state = state,
             onClose = viewModel::hangUp,
@@ -656,6 +696,12 @@ private fun VideoCallScreen(state: AppUiState, viewModel: CallViewModel) {
         ) {
             Text(state.remoteName ?: state.remoteId.orEmpty(), color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
             Text(state.status, color = Color.White.copy(alpha = .7f))
+            SecurityCodePanel(
+                state = state,
+                onVerified = viewModel::markCurrentPeerVerified,
+                modifier = Modifier.padding(top = 8.dp).fillMaxWidth(.62f),
+                dark = true,
+            )
         }
         if (state.chatVisible) {
             EphemeralChatPanel(
@@ -698,6 +744,48 @@ private fun VideoCallScreen(state: AppUiState, viewModel: CallViewModel) {
                 enabled = state.phase == CallPhase.IN_CALL && state.chatReady,
                 onClick = viewModel::toggleChat,
             )
+        }
+    }
+}
+
+@Composable
+private fun SecurityCodePanel(
+    state: AppUiState,
+    onVerified: () -> Unit,
+    modifier: Modifier = Modifier,
+    dark: Boolean = false,
+) {
+    val safetyNumber = state.safetyNumber ?: return
+    val container = if (dark) Color(0xCC101820) else MaterialTheme.colorScheme.surfaceVariant
+    val content = if (dark) Color.White else MaterialTheme.colorScheme.onSurfaceVariant
+    Surface(
+        modifier = modifier,
+        color = container,
+        shape = RoundedCornerShape(12.dp),
+    ) {
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 9.dp)) {
+            Text(
+                if (state.peerIdentityVerified) "Urządzenie zweryfikowane" else "Kod bezpieczeństwa urządzeń",
+                color = if (state.peerIdentityVerified) Color(0xFF62E6A7) else content,
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.Bold,
+            )
+            Text(
+                safetyNumber,
+                color = content.copy(alpha = .88f),
+                fontSize = 10.sp,
+                lineHeight = 14.sp,
+            )
+            if (!state.peerIdentityVerified) {
+                Text(
+                    "Porównaj wszystkie cyfry głosowo lub osobiście.",
+                    color = content.copy(alpha = .68f),
+                    style = MaterialTheme.typography.labelSmall,
+                )
+                TextButton(onClick = onVerified) {
+                    Text("Kod jest zgodny")
+                }
+            }
         }
     }
 }

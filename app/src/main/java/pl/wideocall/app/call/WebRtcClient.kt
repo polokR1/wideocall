@@ -1,9 +1,6 @@
 package pl.wideocall.app.call
 
 import android.content.Context
-import android.media.AudioDeviceInfo
-import android.media.AudioManager
-import android.os.Build
 import org.webrtc.AudioSource
 import org.webrtc.AudioTrack
 import org.webrtc.Camera2Enumerator
@@ -34,13 +31,19 @@ import java.util.concurrent.CopyOnWriteArrayList
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
 
+enum class RtcConnectionState {
+    CONNECTED,
+    DISCONNECTED,
+    FAILED,
+}
+
 class WebRtcClient(
     context: Context,
     private val listener: Listener,
 ) {
     interface Listener {
         fun onLocalIceCandidate(candidate: IceCandidate)
-        fun onConnectionStateChanged(connected: Boolean)
+        fun onConnectionStateChanged(state: RtcConnectionState)
         fun onChatReadyChanged(ready: Boolean)
         fun onChatMessage(message: String)
         fun onError(message: String)
@@ -81,16 +84,18 @@ class WebRtcClient(
             .createPeerConnectionFactory()
     }
 
-    fun prepareSession(isCaller: Boolean, withMedia: Boolean) {
+    fun prepareSession(
+        isCaller: Boolean,
+        withMedia: Boolean,
+        turnConfiguration: TurnConfiguration?,
+    ) {
         closePeerConnection()
         stopLocalMedia()
         remoteDescriptionSet = false
         mediaEnabled = withMedia
         if (withMedia) startLocalMedia()
 
-        val iceServers = listOf(
-            PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer()
-        )
+        val iceServers = buildIceServers(turnConfiguration)
         val configuration = PeerConnection.RTCConfiguration(iceServers).apply {
             sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
             continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
@@ -104,9 +109,12 @@ class WebRtcClient(
                 override fun onIceConnectionChange(newState: PeerConnection.IceConnectionState) {
                     when (newState) {
                         PeerConnection.IceConnectionState.CONNECTED,
-                        PeerConnection.IceConnectionState.COMPLETED -> listener.onConnectionStateChanged(true)
-                        PeerConnection.IceConnectionState.FAILED,
-                        PeerConnection.IceConnectionState.CLOSED -> listener.onConnectionStateChanged(false)
+                        PeerConnection.IceConnectionState.COMPLETED ->
+                            listener.onConnectionStateChanged(RtcConnectionState.CONNECTED)
+                        PeerConnection.IceConnectionState.DISCONNECTED ->
+                            listener.onConnectionStateChanged(RtcConnectionState.DISCONNECTED)
+                        PeerConnection.IceConnectionState.FAILED ->
+                            listener.onConnectionStateChanged(RtcConnectionState.FAILED)
                         else -> Unit
                     }
                 }
@@ -142,12 +150,22 @@ class WebRtcClient(
         localAudioTrack?.let { peerConnection?.addTrack(it, listOf(STREAM_ID)) }
         if (withMedia) {
             peerConnection?.setBitrate(MIN_VIDEO_BITRATE_BPS, START_VIDEO_BITRATE_BPS, MAX_VIDEO_BITRATE_BPS)
-            configureAudio()
         }
     }
 
     fun createOffer(onReady: (SessionDescription) -> Unit) {
-        val constraints = offerAnswerConstraints()
+        createOffer(iceRestart = false, onReady = onReady)
+    }
+
+    fun createIceRestartOffer(onReady: (SessionDescription) -> Unit) {
+        peerConnection?.restartIce()
+        createOffer(iceRestart = true, onReady = onReady)
+    }
+
+    private fun createOffer(iceRestart: Boolean, onReady: (SessionDescription) -> Unit) {
+        val constraints = offerAnswerConstraints().apply {
+            if (iceRestart) mandatory += MediaConstraints.KeyValuePair("IceRestart", "true")
+        }
         peerConnection?.createOffer(object : SimpleSdpObserver() {
             override fun onCreateSuccess(description: SessionDescription) {
                 setLocalDescription(description, onReady)
@@ -224,7 +242,6 @@ class WebRtcClient(
         bindLocalRenderer(null)
         closePeerConnection()
         stopLocalMedia()
-        if (mediaEnabled) restoreAudio()
         mediaEnabled = false
     }
 
@@ -346,6 +363,19 @@ class WebRtcClient(
         mandatory += MediaConstraints.KeyValuePair("OfferToReceiveVideo", mediaEnabled.toString())
     }
 
+    private fun buildIceServers(turnConfiguration: TurnConfiguration?): List<PeerConnection.IceServer> = buildList {
+        add(PeerConnection.IceServer.builder("stun:stun.cloudflare.com:3478").createIceServer())
+        add(PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer())
+        turnConfiguration?.iceServers?.forEach { server ->
+            server.urls.forEach { url ->
+                val builder = PeerConnection.IceServer.builder(url)
+                if (server.username.isNotBlank()) builder.setUsername(server.username)
+                if (server.credential.isNotBlank()) builder.setPassword(server.credential)
+                add(builder.createIceServer())
+            }
+        }
+    }
+
     private fun createCameraCapturer(): CameraVideoCapturer {
         val enumerator: CameraEnumerator = Camera2Enumerator(appContext)
         val preferred = enumerator.deviceNames.firstOrNull(enumerator::isFrontFacing)
@@ -353,33 +383,6 @@ class WebRtcClient(
             ?: error("Nie znaleziono kamery")
         return enumerator.createCapturer(preferred, null)
             ?: error("Nie udało się otworzyć kamery")
-    }
-
-    private fun configureAudio() {
-        val audioManager = appContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            audioManager.availableCommunicationDevices
-                .firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
-                ?.let(audioManager::setCommunicationDevice)
-        } else {
-            setLegacySpeakerphone(audioManager, true)
-        }
-    }
-
-    private fun restoreAudio() {
-        val audioManager = appContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            audioManager.clearCommunicationDevice()
-        } else {
-            setLegacySpeakerphone(audioManager, false)
-        }
-        audioManager.mode = AudioManager.MODE_NORMAL
-    }
-
-    @Suppress("DEPRECATION")
-    private fun setLegacySpeakerphone(audioManager: AudioManager, enabled: Boolean) {
-        audioManager.isSpeakerphoneOn = enabled
     }
 
     private open class SimpleSdpObserver : SdpObserver {

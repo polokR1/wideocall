@@ -6,14 +6,25 @@
       "$userId": {
         ".read": "auth != null",
         ".write": "auth != null && ((newData.exists() && newData.child('authUid').val() === auth.uid && (!data.exists() || data.child('authUid').val() === auth.uid)) || (!newData.exists() && data.child('authUid').val() === auth.uid))",
-        ".validate": "$userId.matches(/^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/) && newData.hasChildren(['authUid', 'online', 'lastSeen']) && newData.child('authUid').isString() && newData.child('online').isBoolean() && (!newData.hasChild('busy') || newData.child('busy').isBoolean()) && (!newData.hasChild('pushReady') || newData.child('pushReady').isBoolean()) && (!newData.hasChild('watchReady') || newData.child('watchReady').isBoolean()) && newData.child('lastSeen').isNumber()"
+        ".validate": "$userId.matches(/^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/) && newData.hasChildren(['authUid', 'online', 'lastSeen']) && newData.child('authUid').isString() && newData.child('authUid').val().length >= 20 && newData.child('authUid').val().length <= 128 && newData.child('online').isBoolean() && (!newData.hasChild('busy') || newData.child('busy').isBoolean()) && (!newData.hasChild('pushReady') || newData.child('pushReady').isBoolean()) && (!newData.hasChild('watchReady') || newData.child('watchReady').isBoolean()) && newData.child('lastSeen').isNumber()",
+        "authUid": { ".validate": true },
+        "online": { ".validate": true },
+        "busy": { ".validate": true },
+        "pushReady": { ".validate": true },
+        "watchReady": { ".validate": true },
+        "lastSeen": { ".validate": true },
+        "$other": { ".validate": false }
       }
     },
     "devices": {
       "$userId": {
         ".read": false,
         ".write": "auth != null && ((newData.exists() && root.child('users').child($userId).child('authUid').val() === auth.uid && newData.child('authUid').val() === auth.uid) || (!newData.exists() && data.child('authUid').val() === auth.uid))",
-        ".validate": "$userId.matches(/^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/) && newData.hasChildren(['authUid', 'token', 'updatedAt']) && newData.child('authUid').isString() && newData.child('token').isString() && newData.child('token').val().length > 20 && newData.child('updatedAt').isNumber()"
+        ".validate": "$userId.matches(/^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/) && newData.hasChildren(['authUid', 'token', 'updatedAt']) && newData.child('authUid').isString() && newData.child('authUid').val().length >= 20 && newData.child('authUid').val().length <= 128 && newData.child('token').isString() && newData.child('token').val().length > 20 && newData.child('token').val().length <= 4096 && newData.child('updatedAt').isNumber()",
+        "authUid": { ".validate": true },
+        "token": { ".validate": true },
+        "updatedAt": { ".validate": true },
+        "$other": { ".validate": false }
       }
     },
     "signals": {
@@ -21,7 +32,23 @@
         ".read": "auth != null && root.child('users').child($recipientId).child('authUid').val() === auth.uid",
         "$messageId": {
           ".write": "auth != null && ((!data.exists() && newData.exists() && newData.child('senderUid').val() === auth.uid && newData.child('to').val() === $recipientId && root.child('users').child(newData.child('from').val()).child('authUid').val() === auth.uid) || (data.exists() && !newData.exists() && root.child('users').child($recipientId).child('authUid').val() === auth.uid))",
-          ".validate": "!newData.exists() || (newData.hasChildren(['type', 'from', 'to', 'senderUid', 'createdAt']) && newData.child('type').isString() && newData.child('from').isString() && newData.child('to').isString() && newData.child('senderUid').isString() && newData.child('createdAt').isNumber() && newData.child('createdAt').val() > now - 120000 && newData.child('createdAt').val() < now + 10000)"
+          ".validate": "!newData.exists() || ($recipientId.matches(/^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/) && $messageId.matches(/^[A-Za-z0-9_-]{10,128}$/) && newData.hasChildren(['type', 'from', 'to', 'senderUid', 'createdAt', 'callId', 'sessionKind']) && newData.child('type').isString() && newData.child('type').val().matches(/^(offer|answer|ice|ice-restart-offer|ice-restart-answer|hangup|reject|busy)$/) && newData.child('from').isString() && newData.child('from').val().matches(/^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/) && newData.child('to').isString() && newData.child('to').val() === $recipientId && newData.child('senderUid').isString() && newData.child('senderUid').val().length >= 20 && newData.child('senderUid').val().length <= 128 && newData.child('callId').isString() && newData.child('callId').val().matches(/^[A-Za-z0-9_-]{8,128}$/) && newData.child('sessionKind').isString() && newData.child('sessionKind').val().matches(/^(video|chat)$/) && newData.child('createdAt').isNumber() && newData.child('createdAt').val() > now - 120000 && newData.child('createdAt').val() < now + 10000 && (!newData.hasChild('sdp') || (newData.child('sdp').isString() && newData.child('sdp').val().length > 0 && newData.child('sdp').val().length <= 200000)) && (!newData.hasChild('sdpType') || (newData.child('sdpType').isString() && newData.child('sdpType').val().matches(/^(offer|answer)$/))) && (!newData.hasChild('candidate') || (newData.child('candidate').isString() && newData.child('candidate').val().length > 0 && newData.child('candidate').val().length <= 4096)) && (!newData.hasChild('sdpMid') || (newData.child('sdpMid').isString() && newData.child('sdpMid').val().length <= 256)) && (!newData.hasChild('sdpMLineIndex') || (newData.child('sdpMLineIndex').isNumber() && newData.child('sdpMLineIndex').val() >= 0 && newData.child('sdpMLineIndex').val() <= 128)) && (!newData.hasChild('reason') || (newData.child('reason').isString() && newData.child('reason').val().length <= 128)) && (((newData.child('type').val() === 'offer' || newData.child('type').val() === 'answer' || newData.child('type').val() === 'ice-restart-offer' || newData.child('type').val() === 'ice-restart-answer') && newData.hasChildren(['sdp', 'sdpType']) && !newData.hasChild('candidate')) || (newData.child('type').val() === 'ice' && newData.hasChildren(['candidate', 'sdpMLineIndex']) && !newData.hasChild('sdp') && !newData.hasChild('sdpType')) || ((newData.child('type').val() === 'hangup' || newData.child('type').val() === 'reject' || newData.child('type').val() === 'busy') && !newData.hasChild('sdp') && !newData.hasChild('sdpType') && !newData.hasChild('candidate') && !newData.hasChild('sdpMid') && !newData.hasChild('sdpMLineIndex'))))",
+          "type": { ".validate": true },
+          "from": { ".validate": true },
+          "to": { ".validate": true },
+          "senderUid": { ".validate": true },
+          "createdAt": { ".validate": true },
+          "callId": { ".validate": true },
+          "sessionKind": { ".validate": true },
+          "sdp": { ".validate": true },
+          "sdpType": { ".validate": true },
+          "candidate": { ".validate": true },
+          "sdpMid": { ".validate": true },
+          "sdpMLineIndex": { ".validate": true },
+          "reason": { ".validate": true },
+          "identityKey": { ".validate": "newData.isString() && newData.val().length >= 100 && newData.val().length <= 512" },
+          "signature": { ".validate": "newData.isString() && newData.val().length >= 80 && newData.val().length <= 512" },
+          "$other": { ".validate": false }
         }
       }
     }
