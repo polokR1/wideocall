@@ -1,32 +1,29 @@
-# Wideocall notification gateway
+# Wideocall Cloudflare signaling gateway
 
-Cloudflare Worker sends a high-priority FCM data message only after it verifies a fresh WebRTC video or chat offer in Firebase Realtime Database. Video, audio, SDP and chat content do not pass through Cloudflare.
+Worker zapewnia sygnalizację WebRTC przez Durable Objects oraz krótkotrwałe dane Cloudflare TURN. Nie przesyła obrazu, dźwięku ani treści czatu.
 
-Android clients also forward `X-Firebase-AppCheck` when Play Integrity attestation is available. The Worker passes this header to Firebase Authentication while validating the anonymous ID token, so Firebase Auth enforcement can later reject untrusted app installations without embedding any attestation secret in the APK.
+Każdy identyfikator Wideocall ma własny Durable Object i hibernowalny WebSocket. Telefon najpierw podpisuje wyzwanie ECDSA P-256 z Android Keystore. Pierwszy prawidłowy klucz dla danego identyfikatora jest przypinany po stronie Durable Object; późniejsza zmiana jest odrzucana. Wiadomości sygnalizacyjne są przekazywane natychmiast do aktywnego WebSocketu. Dla zamkniętej aplikacji oferta i kandydaci ICE są przechowywane najwyżej 45 sekund, po czym Worker wysyła FCM jako wybudzenie.
 
-Required Worker secrets:
+Wymagane sekrety Workera:
 
-- `FIREBASE_WEB_API_KEY` — the Web API key from `app/google-services.json`.
-- `FIREBASE_SERVICE_ACCOUNT_JSON` — a Firebase Admin SDK service-account JSON. Keep it out of Git.
-- `TURN_KEY_ID` — identifier of the dedicated production Cloudflare Realtime TURN key.
-- `TURN_KEY_API_TOKEN` — secret belonging to that TURN key. Keep it only in Worker Secrets.
+- `FIREBASE_SERVICE_ACCOUNT_JSON` — konto serwisowe tylko do wysłania FCM.
+- `TURN_KEY_ID` — identyfikator produkcyjnego klucza Cloudflare TURN.
+- `TURN_KEY_API_TOKEN` — sekret tego klucza.
+- `FIREBASE_WEB_API_KEY` — zachowany wyłącznie dla starszego endpointu `/notify-call`; aktualny Android go nie używa.
 
-The service account needs permission to read Realtime Database and to create Firebase Cloud Messaging messages. For a hardened production setup, replace the default Admin SDK account with a dedicated account using the narrowest available roles. Rotate the key if it is ever copied outside Cloudflare Secrets, and never bundle it in the APK.
+Endpointy:
 
-Endpoints:
+- `GET /health`
+- `GET /signal/{id}` — WebSocket, po otwarciu wymagany podpisany komunikat `authenticate`.
+- `POST /device` — podpisana rejestracja tokenu FCM.
+- `POST /turn-credentials` — podpisane żądanie 24-godzinnych danych TURN.
 
-- `GET /health` — gateway status without exposing secrets.
-- `POST /notify-call` — authenticated video/chat wake request from the Android app. `sessionKind` is limited to `video` or `chat`.
-- `POST /turn-credentials` — returns 24-hour, short-lived Cloudflare TURN credentials to an authenticated Firebase installation. Long-term TURN secrets never reach the APK.
-
-Local checks:
+Lokalne i produkcyjne testy:
 
 ```sh
 npm test
-npm run test:firebase-rules
+npm run test:signal-live
 npm run test:turn-live
 ```
 
-The live TURN check creates a temporary anonymous Firebase user, requests
-short-lived relay credentials from the deployed Worker, verifies their shape
-without printing them, and deletes the temporary user.
+Testy produkcyjne korzystają z losowych tymczasowych identyfikatorów, weryfikują uwierzytelnienie WebSocketu i kształt odpowiedzi TURN, ale nie zastępują testu rozmowy na dwóch telefonach.

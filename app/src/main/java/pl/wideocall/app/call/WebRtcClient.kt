@@ -1,6 +1,9 @@
 package pl.wideocall.app.call
 
 import android.content.Context
+import android.media.AudioAttributes
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import org.webrtc.AudioSource
 import org.webrtc.AudioTrack
 import org.webrtc.Camera2Enumerator
@@ -53,7 +56,17 @@ class WebRtcClient(
 
     private val appContext = context.applicationContext
     private val eglBase = EglBase.create()
-    private val audioDeviceModule = JavaAudioDeviceModule.builder(appContext).createAudioDeviceModule()
+    private val audioDeviceModule = JavaAudioDeviceModule.builder(appContext)
+        .setAudioAttributes(
+            AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                .build()
+        )
+        .setUseHardwareAcousticEchoCanceler(true)
+        .setUseHardwareNoiseSuppressor(true)
+        .setUseLowLatency(true)
+        .createAudioDeviceModule()
     private val peerConnectionFactory: PeerConnectionFactory
     private var peerConnection: PeerConnection? = null
     private var videoCapturer: CameraVideoCapturer? = null
@@ -70,6 +83,7 @@ class WebRtcClient(
     private var remoteDescriptionSet = false
     private var frontCamera = true
     private var mediaEnabled = false
+    private var videoProfile = VideoProfile.wifi()
 
     init {
         PeerConnectionFactory.initialize(
@@ -93,7 +107,8 @@ class WebRtcClient(
         stopLocalMedia()
         remoteDescriptionSet = false
         mediaEnabled = withMedia
-        if (withMedia) startLocalMedia()
+        videoProfile = preferredVideoProfile()
+        if (withMedia) startLocalMedia(videoProfile)
 
         val iceServers = buildIceServers(turnConfiguration)
         val configuration = PeerConnection.RTCConfiguration(iceServers).apply {
@@ -145,11 +160,11 @@ class WebRtcClient(
         }
 
         localVideoTrack?.let { track ->
-            peerConnection?.addTrack(track, listOf(STREAM_ID))?.let(::configureVideoSender)
+            peerConnection?.addTrack(track, listOf(STREAM_ID))?.let { configureVideoSender(it, videoProfile) }
         }
         localAudioTrack?.let { peerConnection?.addTrack(it, listOf(STREAM_ID)) }
         if (withMedia) {
-            peerConnection?.setBitrate(MIN_VIDEO_BITRATE_BPS, START_VIDEO_BITRATE_BPS, MAX_VIDEO_BITRATE_BPS)
+            peerConnection?.setBitrate(videoProfile.minBitrateBps, videoProfile.startBitrateBps, videoProfile.maxBitrateBps)
         }
     }
 
@@ -252,13 +267,13 @@ class WebRtcClient(
         eglBase.release()
     }
 
-    private fun startLocalMedia() {
+    private fun startLocalMedia(profile: VideoProfile) {
         if (localVideoTrack != null) return
         val capturer = createCameraCapturer()
         val helper = SurfaceTextureHelper.create("WideocallCapture", eglContext)
         val source = peerConnectionFactory.createVideoSource(false)
         capturer.initialize(helper, appContext, source.capturerObserver)
-        runCatching { capturer.startCapture(1280, 720, 30) }
+        runCatching { capturer.startCapture(profile.width, profile.height, profile.fps) }
             .onFailure { listener.onError("Nie udało się uruchomić kamery: ${it.message}") }
 
         videoCapturer = capturer
@@ -330,13 +345,13 @@ class WebRtcClient(
         listener.onChatReadyChanged(channel.state() == DataChannel.State.OPEN)
     }
 
-    private fun configureVideoSender(sender: RtpSender) {
+    private fun configureVideoSender(sender: RtpSender, profile: VideoProfile) {
         val parameters = sender.parameters
         parameters.degradationPreference = RtpParameters.DegradationPreference.MAINTAIN_FRAMERATE
         parameters.encodings.forEach { encoding ->
-            encoding.minBitrateBps = MIN_VIDEO_BITRATE_BPS
-            encoding.maxBitrateBps = MAX_VIDEO_BITRATE_BPS
-            encoding.maxFramerate = VIDEO_FPS
+            encoding.minBitrateBps = profile.minBitrateBps
+            encoding.maxBitrateBps = profile.maxBitrateBps
+            encoding.maxFramerate = profile.fps
         }
         sender.setParameters(parameters)
     }
@@ -385,6 +400,16 @@ class WebRtcClient(
             ?: error("Nie udało się otworzyć kamery")
     }
 
+    private fun preferredVideoProfile(): VideoProfile {
+        val manager = appContext.getSystemService(ConnectivityManager::class.java)
+        val capabilities = manager?.getNetworkCapabilities(manager.activeNetwork)
+        return if (capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true) {
+            VideoProfile.cellular()
+        } else {
+            VideoProfile.wifi()
+        }
+    }
+
     private open class SimpleSdpObserver : SdpObserver {
         override fun onCreateSuccess(description: SessionDescription) = Unit
         override fun onSetSuccess() = Unit
@@ -395,10 +420,20 @@ class WebRtcClient(
     companion object {
         private const val STREAM_ID = "wideocall"
         private const val CHAT_CHANNEL = "ephemeral-chat"
-        private const val VIDEO_FPS = 30
-        private const val MIN_VIDEO_BITRATE_BPS = 150_000
-        private const val START_VIDEO_BITRATE_BPS = 800_000
-        private const val MAX_VIDEO_BITRATE_BPS = 1_500_000
         private const val MAX_CHAT_PAYLOAD_BYTES = 4_096
+    }
+
+    private data class VideoProfile(
+        val width: Int,
+        val height: Int,
+        val fps: Int,
+        val minBitrateBps: Int,
+        val startBitrateBps: Int,
+        val maxBitrateBps: Int,
+    ) {
+        companion object {
+            fun cellular() = VideoProfile(640, 360, 15, 80_000, 350_000, 650_000)
+            fun wifi() = VideoProfile(1280, 720, 30, 150_000, 800_000, 1_500_000)
+        }
     }
 }

@@ -9,7 +9,7 @@ import pl.wideocall.app.call.TelecomCallBridge
 class WideocallMessagingService : FirebaseMessagingService() {
     override fun onNewToken(token: String) {
         if (!BuildConfig.FCM_ENABLED) return
-        PushTokenRegistry.refreshAfterTokenChange(this, token)
+        CloudflarePushRegistry.register(this, token)
     }
 
     override fun onMessageReceived(message: RemoteMessage) {

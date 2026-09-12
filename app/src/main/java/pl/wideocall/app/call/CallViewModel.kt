@@ -21,7 +21,6 @@ import pl.wideocall.app.data.Contact
 import pl.wideocall.app.notifications.CallNotifications
 import pl.wideocall.app.notifications.ChatNotifications
 import pl.wideocall.app.notifications.AppVisibility
-import pl.wideocall.app.notifications.CallWatcherService
 import pl.wideocall.app.notifications.OngoingCallService
 import pl.wideocall.app.signaling.ContactPresence
 import pl.wideocall.app.signaling.SignalMessage
@@ -76,7 +75,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     TelecomCallBridge.Listener {
 
     private val preferences = AppPreferences(application)
-    private val signalingClient = SignalingClient(this)
+    private val signalingClient = SignalingClient(application, this)
     private val webRtcClient = WebRtcClient(application, this)
     private val peerIdentityStore = PeerIdentityStore(application)
     private val connectivityManager = application.getSystemService(ConnectivityManager::class.java)
@@ -123,7 +122,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     fun connect() {
         reconnectJob?.cancel()
         reconnectJob = null
-        _state.update { it.copy(phase = CallPhase.CONNECTING_SERVER, status = "Łączenie z Firebase…") }
+        _state.update { it.copy(phase = CallPhase.CONNECTING_SERVER, status = "Łączenie z usługą rozmów…") }
         signalingClient.connect(_state.value.myId)
     }
 
@@ -138,13 +137,9 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
 
     fun saveSettings(displayName: String, watchEnabled: Boolean) {
         preferences.displayName = displayName
-        preferences.watchEnabled = watchEnabled
-        if (watchEnabled) {
-            CallWatcherService.start(getApplication())
-        } else {
-            CallWatcherService.stop(getApplication())
-        }
-        _state.update { it.copy(displayName = preferences.displayName, watchEnabled = watchEnabled) }
+        // FCM wakes a closed app; a permanent Firebase listener is no longer used.
+        preferences.watchEnabled = false
+        _state.update { it.copy(displayName = preferences.displayName, watchEnabled = false) }
     }
 
     fun addContact(name: String, id: String) {
@@ -356,7 +351,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     override fun onConnected() = onMain {
         reconnectJob?.cancel()
         reconnectJob = null
-        TurnCredentialProvider.prefetch()
+        TurnCredentialProvider.prefetch(_state.value.myId)
         signalingClient.observeContacts(_state.value.contacts.map(Contact::id))
         if (_state.value.phase in listOf(CallPhase.CONNECTING_SERVER, CallPhase.SERVER_ERROR, CallPhase.READY)) {
             _state.update { it.copy(phase = CallPhase.READY, status = "Gotowy do rozmowy") }
@@ -747,7 +742,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         withMedia: Boolean,
         onPrepared: () -> Unit,
     ) {
-        TurnCredentialProvider.get { turnConfiguration ->
+        TurnCredentialProvider.get(_state.value.myId) { turnConfiguration ->
             onMain session@{
                 if (activeCallId != callId) return@session
                 runCatching {

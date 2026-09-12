@@ -1,3 +1,7 @@
+import { SignalHub } from "./signal-hub.js";
+
+export { SignalHub };
+
 const FIREBASE_PROJECT_ID = "vidcall-88857";
 const FIREBASE_DATABASE_URL = "https://vidcall-88857-default-rtdb.europe-west1.firebasedatabase.app";
 const USER_ID = /^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/;
@@ -18,10 +22,19 @@ export default {
         ok: true,
         configured: hasConfiguration(env),
         turnConfigured: hasTurnConfiguration(env),
+        signalingConfigured: Boolean(env.SIGNAL_HUB),
       });
     }
+    if (request.method === "GET" && url.pathname.startsWith("/signal/")) {
+      const userId = url.pathname.split("/").at(-1)?.toUpperCase() || "";
+      if (!USER_ID.test(userId) || !env.SIGNAL_HUB) return json({ error: "not_found" }, 404);
+      return env.SIGNAL_HUB.getByName(`user:${userId}`).fetch(request);
+    }
+    if (request.method === "POST" && url.pathname === "/device") {
+      return registerDevice(request, env);
+    }
     if (request.method === "POST" && url.pathname === "/turn-credentials") {
-      if (!hasConfiguration(env) || !hasTurnConfiguration(env)) {
+      if (!hasTurnConfiguration(env) || !env.SIGNAL_HUB) {
         return json({ error: "turn_not_configured" }, 503);
       }
       try {
@@ -52,12 +65,7 @@ export default {
 };
 
 async function issueTurnCredentials(request, env) {
-  const bearer = readBearer(request.headers.get("authorization"));
-  if (!bearer) return json({ error: "unauthorized" }, 401);
-  const appCheckToken = readAppCheckToken(request.headers.get("x-firebase-appcheck"));
-
-  const firebaseUser = await verifyFirebaseIdToken(bearer, env.FIREBASE_WEB_API_KEY, appCheckToken);
-  if (!firebaseUser?.localId) return json({ error: "unauthorized" }, 401);
+  if (!await authorizeDevice(request, env, "turn")) return json({ error: "unauthorized" }, 401);
 
   const response = await fetch(
     `https://rtc.live.cloudflare.com/v1/turn/keys/${encodeURIComponent(env.TURN_KEY_ID)}/credentials/generate-ice-servers`,
@@ -80,6 +88,35 @@ async function issueTurnCredentials(request, env) {
     iceServers: normalized,
     expiresAt: Date.now() + TURN_TTL_SECONDS * 1000,
   });
+}
+
+async function registerDevice(request, env) {
+  if (!env.SIGNAL_HUB) return json({ error: "signaling_not_configured" }, 503);
+  const raw = await readSmallBody(request, 8_192);
+  const body = parseJson(raw);
+  if (!body || !USER_ID.test(body.userId || "")) return json({ error: "unauthorized" }, 401);
+  const hub = env.SIGNAL_HUB.getByName(`user:${body.userId}`);
+  return hub.fetch(new Request("https://signal-hub/device", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: raw,
+  }));
+}
+
+async function authorizeDevice(request, env, operation) {
+  const raw = await readSmallBody(request, 4_096);
+  const body = parseJson(raw);
+  if (!body || !USER_ID.test(body.userId || "")) return false;
+  body.operation = operation;
+  const hub = env.SIGNAL_HUB.getByName(`user:${body.userId}`);
+  const response = await hub.fetch(new Request("https://signal-hub/authorize", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }));
+  if (!response.ok) return false;
+  const result = await response.json();
+  return result?.authorized === true;
 }
 
 async function notifyIncomingCall(request, env) {
@@ -237,6 +274,47 @@ async function readBody(request) {
     return null;
   } finally {
     reader.releaseLock();
+  }
+}
+
+async function readSmallBody(request, limit) {
+  const contentLength = Number(request.headers.get("content-length") || "0");
+  if (contentLength > limit) return null;
+  const reader = request.body?.getReader();
+  if (!reader) return null;
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > limit) {
+        await reader.cancel();
+        return null;
+      }
+      chunks.push(value);
+    }
+    const bytes = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.length;
+    }
+    return new TextDecoder().decode(bytes);
+  } catch {
+    return null;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function parseJson(raw) {
+  if (typeof raw !== "string") return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
   }
 }
 

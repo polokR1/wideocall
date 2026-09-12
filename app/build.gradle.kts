@@ -13,8 +13,8 @@ android {
         applicationId = "pl.wideocall.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 11
-        versionName = "0.8.0"
+        versionCode = 12
+        versionName = "0.9.0"
         buildConfigField("boolean", "FCM_ENABLED", "true")
         buildConfigField(
             "String",
@@ -25,6 +25,16 @@ android {
             "String",
             "TURN_CREDENTIALS_URL",
             "\"https://wideocall-notify.wideocall-polokr1.workers.dev/turn-credentials\"",
+        )
+        buildConfigField(
+            "String",
+            "SIGNALING_HTTP_URL",
+            "\"https://wideocall-notify.wideocall-polokr1.workers.dev\"",
+        )
+        buildConfigField(
+            "String",
+            "SIGNALING_WEBSOCKET_URL",
+            "\"wss://wideocall-notify.wideocall-polokr1.workers.dev/signal\"",
         )
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -88,6 +98,7 @@ dependencies {
     implementation("com.google.firebase:firebase-database")
     implementation("com.google.firebase:firebase-messaging")
     implementation("io.github.webrtc-sdk:android:144.7559.15")
+    implementation("com.squareup.okhttp3:okhttp:5.3.0")
 
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")

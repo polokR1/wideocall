@@ -5,7 +5,7 @@ import android.os.Handler
 import android.os.Looper
 import org.json.JSONObject
 import pl.wideocall.app.BuildConfig
-import pl.wideocall.app.auth.FirebaseBackendAuth
+import pl.wideocall.app.security.CloudflareDeviceAuth
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.net.URL
@@ -39,11 +39,11 @@ object TurnCredentialProvider {
     private var cached: TurnConfiguration? = null
     private var requestInFlight = false
 
-    fun prefetch() {
-        get { }
+    fun prefetch(userId: String) {
+        get(userId) { }
     }
 
-    fun get(onResult: (TurnConfiguration?) -> Unit) {
+    fun get(userId: String, onResult: (TurnConfiguration?) -> Unit) {
         cached?.takeIf { it.expiresAt - CACHE_MARGIN_MS > System.currentTimeMillis() }?.let {
             deliver(onResult, it)
             return
@@ -62,14 +62,8 @@ object TurnCredentialProvider {
             requestInFlight = true
         }
 
-        FirebaseBackendAuth.get { tokens ->
-            if (tokens == null) {
-                finish(null)
-                return@get
-            }
-            executor.execute {
-                finish(request(tokens.idToken, tokens.appCheckToken))
-            }
+        executor.execute {
+            finish(request(userId))
         }
     }
 
@@ -87,18 +81,18 @@ object TurnCredentialProvider {
         else mainHandler.post { callback(configuration) }
     }
 
-    private fun request(idToken: String, appCheckToken: String?): TurnConfiguration? {
+    private fun request(userId: String): TurnConfiguration? {
         val connection = runCatching {
             (URL(BuildConfig.TURN_CREDENTIALS_URL).openConnection() as HttpsURLConnection).apply {
                 requestMethod = "POST"
-                connectTimeout = 8_000
-                readTimeout = 10_000
-                setFixedLengthStreamingMode(0)
+                connectTimeout = 3_000
+                readTimeout = 4_000
                 doOutput = true
-                setRequestProperty("Authorization", "Bearer $idToken")
-                appCheckToken?.let { setRequestProperty("X-Firebase-AppCheck", it) }
+                setRequestProperty("Content-Type", "application/json; charset=utf-8")
                 setRequestProperty("Accept", "application/json")
-                outputStream.use { }
+                val body = CloudflareDeviceAuth.request(userId, "turn").toString().toByteArray(Charsets.UTF_8)
+                setFixedLengthStreamingMode(body.size)
+                outputStream.use { it.write(body) }
             }
         }.getOrElse {
             Log.w(TAG, "TURN gateway unavailable")

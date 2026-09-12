@@ -5,6 +5,7 @@
   "scripts": {
     "test": "node --test test/index.test.js",
     "test:firebase-rules": "node test/firebase-rules-smoke.mjs",
-    "test:turn-live": "node test/turn-live-smoke.mjs"
+    "test:turn-live": "node test/turn-live-smoke.mjs",
+    "test:signal-live": "node test/signal-live-smoke.mjs"
   }
 }

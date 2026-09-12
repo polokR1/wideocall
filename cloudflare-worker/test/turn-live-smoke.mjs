@@ -1,73 +1,37 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { createSign, generateKeyPairSync, randomInt } from "node:crypto";
 
-const WORKER_URL = process.env.WIDEOCALL_WORKER_URL ||
-  "https://wideocall-notify.wideocall-polokr1.workers.dev";
-const PACKAGE_NAME = "pl.wideocall.app";
+const WORKER_URL = process.env.WIDEOCALL_WORKER_URL || "https://wideocall-notify.wideocall-polokr1.workers.dev";
+const ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+const segment = () => Array.from({ length: 4 }, () => ALPHABET[randomInt(ALPHABET.length)]).join("");
+const userId = `${segment()}-${segment()}`;
+const key = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+const identityKey = key.publicKey.export({ type: "spki", format: "der" }).toString("base64");
+const timestamp = Date.now();
 
-const config = JSON.parse(
-  await readFile(new URL("../../app/google-services.json", import.meta.url), "utf8"),
-);
-const client = config.client.find(
-  (entry) => entry.client_info?.android_client_info?.package_name === PACKAGE_NAME,
-);
-const apiKey = client?.api_key?.[0]?.current_key;
-assert.equal(typeof apiKey, "string", "Firebase Web API key is missing");
-
-let idToken = null;
-let deletionStatus = null;
-
-try {
-  const signUpResponse = await fetch(
-    `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${encodeURIComponent(apiKey)}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ returnSecureToken: true }),
-    },
-  );
-  assert.equal(signUpResponse.status, 200, `Firebase anonymous auth failed: ${signUpResponse.status}`);
-  const signUp = await signUpResponse.json();
-  idToken = signUp.idToken;
-  assert.equal(typeof idToken, "string", "Firebase did not return an ID token");
-
-  const turnResponse = await fetch(`${WORKER_URL}/turn-credentials`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${idToken}` },
-  });
-  assert.equal(turnResponse.status, 200, `TURN endpoint failed: ${turnResponse.status}`);
-  const turn = await turnResponse.json();
-  assert.ok(Array.isArray(turn.iceServers), "TURN response has no ICE server list");
-  const relay = turn.iceServers.find(
-    (server) => server.username && server.credential &&
-      server.urls?.some((url) => url.startsWith("turn:") || url.startsWith("turns:")),
-  );
-  assert.ok(relay, "TURN response has no authenticated relay server");
-  assert.ok(turn.expiresAt > Date.now() + 23 * 60 * 60 * 1000, "TURN credentials expire too soon");
-
-  console.log(JSON.stringify({
-    ok: true,
-    firebaseAnonymousAuth: true,
-    workerAuthenticated: true,
-    turnCredentialsIssued: true,
-    iceServerCount: turn.iceServers.length,
-    relayUrlCount: relay.urls.length,
-    ttlHours: Math.round((turn.expiresAt - Date.now()) / 3_600_000),
-  }));
-} finally {
-  if (idToken) {
-    const deletionResponse = await fetch(
-      `https://identitytoolkit.googleapis.com/v1/accounts:delete?key=${encodeURIComponent(apiKey)}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ idToken }),
-      },
-    );
-    deletionStatus = deletionResponse.status;
+function payload(values) {
+  const chunks = [];
+  for (const value of values) {
+    const bytes = Buffer.from(value, "utf8");
+    const length = Buffer.alloc(4);
+    length.writeUInt32BE(bytes.length);
+    chunks.push(length, bytes);
   }
-  if (deletionStatus !== null && deletionStatus !== 200) {
-    console.error(`Temporary Firebase user cleanup failed: ${deletionStatus}`);
-    process.exitCode = 1;
-  }
+  return Buffer.concat(chunks);
 }
+
+const signer = createSign("SHA256");
+signer.update(payload(["wideocall-device-auth-v1", "turn", userId, String(timestamp), identityKey]));
+const signature = signer.sign(key.privateKey).toString("base64");
+const response = await fetch(`${WORKER_URL}/turn-credentials`, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ userId, operation: "turn", timestamp, identityKey, signature }),
+});
+assert.equal(response.status, 200, `TURN endpoint failed: ${response.status}`);
+const turn = await response.json();
+assert.ok(Array.isArray(turn.iceServers), "TURN response has no ICE server list");
+const relay = turn.iceServers.find((server) => server.username && server.credential && server.urls?.some((url) => url.startsWith("turn:") || url.startsWith("turns:")));
+assert.ok(relay, "TURN response has no authenticated relay server");
+assert.ok(turn.expiresAt > Date.now() + 23 * 60 * 60 * 1000, "TURN credentials expire too soon");
+console.log(JSON.stringify({ ok: true, cloudflareDeviceAuth: true, turnCredentialsIssued: true, iceServerCount: turn.iceServers.length, relayUrlCount: relay.urls.length, ttlHours: Math.round((turn.expiresAt - Date.now()) / 3_600_000) }));

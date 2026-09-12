@@ -106,7 +106,6 @@ import pl.wideocall.app.call.CallViewModel
 import pl.wideocall.app.data.AppPreferences
 import pl.wideocall.app.data.Contact
 import pl.wideocall.app.notifications.CallNotifications
-import pl.wideocall.app.notifications.CallWatcherService
 import pl.wideocall.app.signaling.ContactPresence
 import pl.wideocall.app.ui.theme.WideocallTheme
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -166,11 +165,6 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         viewModel.refreshPreferences()
-        if (AppPreferences(this).watchEnabled) {
-            CallWatcherService.start(this)
-        } else {
-            CallWatcherService.stop(this)
-        }
     }
 
     private fun captureNotificationAction(intent: Intent?) {
@@ -376,13 +370,11 @@ private fun HomeScreen(
                 item { EmptyContactsCard(onAdd = { showAddContact = true }) }
             } else {
                 items(state.contacts, key = { it.id }) { contact ->
-                    val contactAvailable = state.contactPresence[contact.id]
-                        ?.let { !it.busy && (it.online || it.pushReady || it.watchReady) } == true
                     ContactCard(
                         contact = contact,
                         presence = state.contactPresence[contact.id],
-                        callEnabled = state.phase == CallPhase.READY && contactAvailable,
-                        chatEnabled = state.phase == CallPhase.READY && contactAvailable,
+                        callEnabled = state.phase == CallPhase.READY,
+                        chatEnabled = state.phase == CallPhase.READY,
                         onCall = {
                             if (permissionsGranted) viewModel.call(contact) else requestPermissions()
                         },
@@ -523,7 +515,7 @@ private fun ContactCard(
         presence?.online == true -> "Dostępny"
         presence?.watchReady == true -> "Czuwanie aktywne"
         presence?.pushReady == true -> "Dostępny przez powiadomienie"
-        presence == null -> "Sprawdzanie dostępności…"
+        presence == null -> "Dostępność sprawdzana przy połączeniu"
         presence.lastSeen > 0L -> "Offline • ostatnio ${relativeLastSeen(presence.lastSeen)}"
         else -> "Offline"
     }
@@ -978,7 +970,6 @@ private fun AddContactDialog(onDismiss: () -> Unit, onSave: (String, String) -> 
 @Composable
 private fun SettingsDialog(state: AppUiState, onDismiss: () -> Unit, onSave: (String, Boolean) -> Unit) {
     var name by remember { mutableStateOf(state.displayName) }
-    var watchEnabled by remember { mutableStateOf(state.watchEnabled) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Ustawienia") },
@@ -996,24 +987,23 @@ private fun SettingsDialog(state: AppUiState, onDismiss: () -> Unit, onSave: (St
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(Modifier.weight(1f)) {
-                        Text("Zapasowe czuwanie", fontWeight = FontWeight.SemiBold)
+                        Text("Odbieranie w tle", fontWeight = FontWeight.SemiBold)
                         Text(
-                            "Opcjonalne. Włącz tylko wtedy, gdy producent telefonu opóźnia zwykłe powiadomienia FCM. Powoduje stałe, ciche powiadomienie.",
+                            "Zamknięty telefon jest budzony przez systemowe powiadomienie o połączeniu. Nie ma stałego połączenia z Firebase ani trwałego powiadomienia czuwania.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    Switch(checked = watchEnabled, onCheckedChange = { watchEnabled = it })
                 }
                 Text(
-                    "Połączenia są zestawiane automatycznie przez Firebase. Bez kont i logowania.",
+                    "Połączenia są zestawiane przez szybką usługę Wideocall. Bez kont i logowania.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         },
         confirmButton = {
-            Button(onClick = { onSave(name, watchEnabled) }, enabled = name.isNotBlank()) { Text("Zapisz") }
+            Button(onClick = { onSave(name, false) }, enabled = name.isNotBlank()) { Text("Zapisz") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Anuluj") } },
     )
