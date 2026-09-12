@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "test": "node --test test/index.test.js",
-    "test:firebase-rules": "node test/firebase-rules-smoke.mjs"
+    "test:firebase-rules": "node test/firebase-rules-smoke.mjs",
+    "test:turn-live": "node test/turn-live-smoke.mjs"
   }
 }

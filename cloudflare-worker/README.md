@@ -24,4 +24,9 @@ Local checks:
 ```sh
 npm test
 npm run test:firebase-rules
+npm run test:turn-live
 ```
+
+The live TURN check creates a temporary anonymous Firebase user, requests
+short-lived relay credentials from the deployed Worker, verifies their shape
+without printing them, and deletes the temporary user.
