@@ -4,6 +4,8 @@ import android.content.Context
 import android.media.AudioAttributes
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import pl.wideocall.app.data.AppPreferences
+import pl.wideocall.app.data.VideoQualityMode
 import org.webrtc.AudioSource
 import org.webrtc.AudioTrack
 import org.webrtc.Camera2Enumerator
@@ -107,6 +109,7 @@ class WebRtcClient(
         stopLocalMedia()
         remoteDescriptionSet = false
         mediaEnabled = withMedia
+        frontCamera = AppPreferences(appContext).startWithFrontCamera
         videoProfile = preferredVideoProfile()
         if (withMedia) startLocalMedia(videoProfile)
 
@@ -393,7 +396,11 @@ class WebRtcClient(
 
     private fun createCameraCapturer(): CameraVideoCapturer {
         val enumerator: CameraEnumerator = Camera2Enumerator(appContext)
-        val preferred = enumerator.deviceNames.firstOrNull(enumerator::isFrontFacing)
+        val preferred = if (frontCamera) {
+            enumerator.deviceNames.firstOrNull(enumerator::isFrontFacing)
+        } else {
+            enumerator.deviceNames.firstOrNull(enumerator::isBackFacing)
+        }
             ?: enumerator.deviceNames.firstOrNull()
             ?: error("Nie znaleziono kamery")
         return enumerator.createCapturer(preferred, null)
@@ -401,6 +408,11 @@ class WebRtcClient(
     }
 
     private fun preferredVideoProfile(): VideoProfile {
+        when (AppPreferences(appContext).videoQualityMode) {
+            VideoQualityMode.DATA_SAVER -> return VideoProfile.cellular()
+            VideoQualityMode.HIGH -> return VideoProfile.wifi()
+            VideoQualityMode.AUTO -> Unit
+        }
         val manager = appContext.getSystemService(ConnectivityManager::class.java)
         val capabilities = manager?.getNetworkCapabilities(manager.activeNetwork)
         return if (capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true) {

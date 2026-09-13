@@ -12,6 +12,8 @@ import android.media.AudioAttributes
 import android.media.RingtoneManager
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -20,12 +22,14 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.core.net.toUri
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -67,6 +71,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -79,6 +84,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -98,6 +104,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import org.webrtc.EglBase
 import org.webrtc.RendererCommon
 import org.webrtc.SurfaceViewRenderer
@@ -108,6 +116,7 @@ import pl.wideocall.app.call.TelecomCallBridge
 import pl.wideocall.app.data.AppPreferences
 import pl.wideocall.app.data.Contact
 import pl.wideocall.app.data.FriendRequest
+import pl.wideocall.app.data.VideoQualityMode
 import pl.wideocall.app.notifications.CallNotifications
 import pl.wideocall.app.signaling.ContactPresence
 import pl.wideocall.app.ui.theme.WideocallTheme
@@ -206,6 +215,7 @@ private fun PermissionGate(
 ) {
     val context = LocalContext.current
     var permissionsGranted by remember { mutableStateOf(hasMediaPermissions(context)) }
+    var notificationGranted by remember { mutableStateOf(hasNotificationPermission(context)) }
     val mediaLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { results ->
@@ -214,7 +224,7 @@ private fun PermissionGate(
     }
     val notificationLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { }
+    ) { notificationGranted = hasNotificationPermission(context) }
 
     LaunchedEffect(Unit) {
         if (!hasNotificationPermission(context)) {
@@ -268,17 +278,29 @@ private fun PermissionGate(
             state = state,
             viewModel = viewModel,
             permissionsGranted = permissionsGranted,
+            notificationGranted = notificationGranted,
             fullScreenIntentAllowed = fullScreenIntentAllowed,
             requestFullScreenIntent = requestFullScreenIntent,
             requestPermissions = { mediaLauncher.launch(requiredMediaPermissions()) },
+            requestNotifications = {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                }
+            },
         )
         else -> HomeScreen(
             state = state,
             viewModel = viewModel,
             permissionsGranted = permissionsGranted,
+            notificationGranted = notificationGranted,
             fullScreenIntentAllowed = fullScreenIntentAllowed,
             requestFullScreenIntent = requestFullScreenIntent,
             requestPermissions = { mediaLauncher.launch(requiredMediaPermissions()) },
+            requestNotifications = {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                }
+            },
         )
     }
 }
@@ -310,9 +332,11 @@ private fun HomeScreen(
     state: AppUiState,
     viewModel: CallViewModel,
     permissionsGranted: Boolean,
+    notificationGranted: Boolean,
     fullScreenIntentAllowed: Boolean,
     requestFullScreenIntent: () -> Unit,
     requestPermissions: () -> Unit,
+    requestNotifications: () -> Unit,
 ) {
     val context = LocalContext.current
     var showAddContact by remember { mutableStateOf(false) }
@@ -417,9 +441,16 @@ private fun HomeScreen(
     if (showSettings) {
         SettingsDialog(
             state = state,
+            mediaPermissionsGranted = permissionsGranted,
+            notificationPermissionGranted = notificationGranted,
+            fullScreenIntentAllowed = fullScreenIntentAllowed,
+            requestMediaPermissions = requestPermissions,
+            requestNotificationPermission = requestNotifications,
+            requestFullScreenIntent = requestFullScreenIntent,
+            testConnection = viewModel::connect,
             onDismiss = { showSettings = false },
-            onSave = { name, watchEnabled ->
-                viewModel.saveSettings(name, watchEnabled)
+            onSave = { name, quality, frontCamera ->
+                viewModel.saveSettings(name, quality, frontCamera)
                 showSettings = false
             },
         )
@@ -1012,45 +1043,292 @@ private fun AddContactDialog(onDismiss: () -> Unit, onSave: (String) -> Unit) {
 }
 
 @Composable
-private fun SettingsDialog(state: AppUiState, onDismiss: () -> Unit, onSave: (String, Boolean) -> Unit) {
+private fun SettingsDialog(
+    state: AppUiState,
+    mediaPermissionsGranted: Boolean,
+    notificationPermissionGranted: Boolean,
+    fullScreenIntentAllowed: Boolean,
+    requestMediaPermissions: () -> Unit,
+    requestNotificationPermission: () -> Unit,
+    requestFullScreenIntent: () -> Unit,
+    testConnection: () -> Unit,
+    onDismiss: () -> Unit,
+    onSave: (String, VideoQualityMode, Boolean) -> Unit,
+) {
+    val context = LocalContext.current
     var name by remember { mutableStateOf(state.displayName) }
-    AlertDialog(
+    var quality by remember { mutableStateOf(state.videoQualityMode) }
+    var frontCamera by remember { mutableStateOf(state.startWithFrontCamera) }
+    Dialog(
         onDismissRequest = onDismiss,
-        title = { Text("Ustawienia") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 760.dp)
+                .padding(horizontal = 16.dp, vertical = 24.dp),
+            shape = RoundedCornerShape(24.dp),
+            tonalElevation = 6.dp,
+        ) {
+            Column {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, top = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        "Ustawienia",
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    IconButton(onClick = onDismiss) { Icon(Icons.Default.Close, "Zamknij") }
+                }
+                LazyColumn(
+                    modifier = Modifier.weight(1f),
+                    contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    item {
+                        SettingsSection("To urządzenie") {
                 OutlinedTextField(
                     value = name,
-                    onValueChange = { name = it },
+                                    onValueChange = { name = it.take(80) },
                     label = { Text("Nazwa tego telefonu") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text("Odbieranie w tle", fontWeight = FontWeight.SemiBold)
-                        Text(
-                            "Zamknięty telefon jest budzony przez systemowe powiadomienie o połączeniu. Nie ma stałego połączenia z Firebase ani trwałego powiadomienia czuwania.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
+                            Text("Identyfikator: ${state.myId}", fontWeight = FontWeight.SemiBold)
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                OutlinedButton(onClick = {
+                                    runCatching {
+                                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                        clipboard.setPrimaryClip(ClipData.newPlainText("Wideocall ID", state.myId))
+                                        Toast.makeText(context, "ID skopiowane", Toast.LENGTH_SHORT).show()
+                                    }.onFailure {
+                                        Toast.makeText(context, "Nie udało się skopiować ID", Toast.LENGTH_SHORT).show()
+                                    }
+                                }) { Text("Kopiuj") }
+                                OutlinedButton(onClick = {
+                                    runCatching {
+                                        val invitation = "Dodaj mnie w Wideocall. Mój identyfikator: ${state.myId}"
+                                        context.startActivity(
+                                            Intent.createChooser(
+                                                Intent(Intent.ACTION_SEND).apply {
+                                                    type = "text/plain"
+                                                    putExtra(Intent.EXTRA_TEXT, invitation)
+                                                },
+                                                "Udostępnij zaproszenie",
+                                            )
+                                        )
+                                    }.onFailure {
+                                        Toast.makeText(context, "Nie udało się udostępnić zaproszenia", Toast.LENGTH_SHORT).show()
+                                    }
+                                }) { Text("Zaproś") }
+                            }
+                        }
+                    }
+
+                    item {
+                        SettingsSection("Jakość rozmowy") {
+                            Text(
+                                "Zmiana obowiązuje od następnego połączenia.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            QualityOption(
+                                selected = quality == VideoQualityMode.AUTO,
+                                title = "Automatyczna",
+                                description = "Dopasowuje obraz do Wi‑Fi lub sieci komórkowej.",
+                                onClick = { quality = VideoQualityMode.AUTO },
+                            )
+                            QualityOption(
+                                selected = quality == VideoQualityMode.DATA_SAVER,
+                                title = "Oszczędna",
+                                description = "360p i niższy transfer — najlepsza przy słabym zasięgu.",
+                                onClick = { quality = VideoQualityMode.DATA_SAVER },
+                            )
+                            QualityOption(
+                                selected = quality == VideoQualityMode.HIGH,
+                                title = "Wysoka",
+                                description = "Do 720p/30 kl./s — wymaga stabilnego łącza.",
+                                onClick = { quality = VideoQualityMode.HIGH },
+                            )
+                            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                Column(Modifier.weight(1f)) {
+                                    Text("Domyślna kamera", fontWeight = FontWeight.SemiBold)
+                                    Text(
+                                        if (frontCamera) "Przednia" else "Tylna",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                Switch(checked = frontCamera, onCheckedChange = { frontCamera = it })
+                            }
+                            Text(
+                                "Głośnik, słuchawki i Bluetooth są przełączane przez system Android podczas rozmowy.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+
+                    item {
+                        SettingsSection("Gotowość telefonu") {
+                            StatusLine("Kamera i mikrofon", mediaPermissionsGranted)
+                            if (!mediaPermissionsGranted) {
+                                TextButton(onClick = requestMediaPermissions) { Text("Nadaj uprawnienia") }
+                            }
+                            StatusLine("Powiadomienia", notificationPermissionGranted)
+                            if (!notificationPermissionGranted && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                TextButton(onClick = requestNotificationPermission) { Text("Włącz powiadomienia") }
+                            }
+                            StatusLine("Pełny ekran połączenia", fullScreenIntentAllowed)
+                            if (!fullScreenIntentAllowed) {
+                                TextButton(onClick = requestFullScreenIntent) { Text("Zezwól w systemie") }
+                            }
+                            val batteryUnrestricted = context.getSystemService(PowerManager::class.java)
+                                ?.isIgnoringBatteryOptimizations(context.packageName) == true
+                            StatusLine(
+                                "Działanie w tle",
+                                true,
+                                if (batteryUnrestricted) "bez ograniczeń" else "FCM aktywne",
+                            )
+                            TextButton(onClick = {
+                                runCatching {
+                                    context.startActivity(
+                                        Intent(
+                                            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                            "package:${context.packageName}".toUri(),
+                                        )
+                                    )
+                                }.onFailure {
+                                    Toast.makeText(context, "Nie udało się otworzyć ustawień systemowych", Toast.LENGTH_SHORT).show()
+                                }
+                            }) { Text("Ustawienia systemowe aplikacji") }
+                            Text(
+                                "Po zamknięciu aplikacji telefon jest budzony przez powiadomienie FCM. Nie jest utrzymywane stałe powiadomienie czuwania.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+
+                    item {
+                        SettingsSection("Prywatność i bezpieczeństwo") {
+                            StatusLine("Szyfrowanie transportu WebRTC", true)
+                            StatusLine("Podpisywanie tożsamości kontaktów", true)
+                            StatusLine("Blokada zrzutów w tajnym czacie", true)
+                            Text(
+                                "Wiadomości nie są zapisywane w bazie i znikają 60 sekund po ich otwarciu. Numer bezpieczeństwa pozwala zweryfikować rozmówcę.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+
+                    item {
+                        SettingsSection("Stan usług") {
+                            StatusLine(
+                                "Sygnalizacja Cloudflare",
+                                state.phase != CallPhase.SERVER_ERROR && state.phase != CallPhase.CONNECTING_SERVER,
+                                when (state.phase) {
+                                    CallPhase.CONNECTING_SERVER -> "łączenie"
+                                    CallPhase.SERVER_ERROR -> "błąd"
+                                    else -> "połączono"
+                                },
+                            )
+                            StatusLine("Wybudzanie FCM", BuildConfig.FCM_ENABLED)
+                            StatusLine("Przekaźnik TURN", BuildConfig.TURN_CREDENTIALS_URL.isNotBlank(), "automatyczny")
+                            OutlinedButton(onClick = testConnection) { Text("Odśwież połączenie") }
+                            state.diagnostic?.let {
+                                Text(
+                                    "Ostatnia informacja: $it",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.error,
+                                )
+                            }
+                        }
+                    }
+
+                    item {
+                        SettingsSection("O aplikacji") {
+                            Text("Wideocall ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})", fontWeight = FontWeight.SemiBold)
+                            Text(
+                                "Wariant: ${BuildConfig.BUILD_TYPE}\nAndroid ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Text(
+                                "Bez konta użytkownika. Identyfikator i ustawienia są przechowywane lokalnie na urządzeniu.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                     }
                 }
-                Text(
-                    "Połączenia są zestawiane przez szybką usługę Wideocall. Bez kont i logowania.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                HorizontalDivider()
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(12.dp),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    TextButton(onClick = onDismiss) { Text("Anuluj") }
+                    Button(
+                        onClick = { onSave(name.trim(), quality, frontCamera) },
+                        enabled = name.isNotBlank(),
+                    ) { Text("Zapisz") }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SettingsSection(title: String, content: @Composable ColumnScope.() -> Unit) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            content()
+        }
+    }
+}
+
+@Composable
+private fun QualityOption(
+    selected: Boolean,
+    title: String,
+    description: String,
+    onClick: () -> Unit,
+) {
+    FilterChip(
+        selected = selected,
+        onClick = onClick,
+        label = {
+            Column(Modifier.padding(vertical = 4.dp)) {
+                Text(title, fontWeight = FontWeight.SemiBold)
+                Text(description, style = MaterialTheme.typography.bodySmall)
             }
         },
-        confirmButton = {
-            Button(onClick = { onSave(name, false) }, enabled = name.isNotBlank()) { Text("Zapisz") }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Anuluj") } },
+        modifier = Modifier.fillMaxWidth(),
     )
+}
+
+@Composable
+private fun StatusLine(label: String, ok: Boolean, detail: String = if (ok) "gotowe" else "wymaga uwagi") {
+    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Icon(
+            imageVector = if (ok) Icons.Default.CheckCircle else Icons.Default.Close,
+            contentDescription = null,
+            tint = if (ok) Color(0xFF2E7D32) else MaterialTheme.colorScheme.error,
+            modifier = Modifier.size(20.dp),
+        )
+        Text(label, modifier = Modifier.padding(start = 8.dp).weight(1f))
+        Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
 }
 
 private fun hasMediaPermissions(context: Context): Boolean =

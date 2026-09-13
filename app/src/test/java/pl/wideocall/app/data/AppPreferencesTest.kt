@@ -13,4 +13,15 @@ class AppPreferencesTest {
     fun normalizeId_removesAmbiguousAndExtraCharacters() {
         assertEquals("ABCD-EFGH", AppPreferences.normalizeId("A1B0C-DIEOFGHZZ"))
     }
+
+    @Test
+    fun videoQualityMode_readsKnownValue() {
+        assertEquals(VideoQualityMode.HIGH, VideoQualityMode.fromStored("HIGH"))
+    }
+
+    @Test
+    fun videoQualityMode_fallsBackToAutoForInvalidValue() {
+        assertEquals(VideoQualityMode.AUTO, VideoQualityMode.fromStored("unknown"))
+        assertEquals(VideoQualityMode.AUTO, VideoQualityMode.fromStored(null))
+    }
 }

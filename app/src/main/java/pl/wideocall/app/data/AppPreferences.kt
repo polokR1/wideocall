@@ -1,6 +1,7 @@
 package pl.wideocall.app.data
 
 import android.content.Context
+import androidx.core.content.edit
 import org.json.JSONArray
 import org.json.JSONObject
 import java.security.SecureRandom
@@ -15,6 +16,17 @@ data class FriendRequest(
     val fromId: String,
     val displayName: String,
 )
+
+enum class VideoQualityMode {
+    AUTO,
+    DATA_SAVER,
+    HIGH;
+
+    companion object {
+        fun fromStored(value: String?): VideoQualityMode =
+            entries.firstOrNull { it.name == value } ?: AUTO
+    }
+}
 
 class AppPreferences(context: Context) {
     private val preferences = context.getSharedPreferences("wideocall", Context.MODE_PRIVATE)
@@ -42,6 +54,14 @@ class AppPreferences(context: Context) {
     var watchEnabled: Boolean
         get() = preferences.getBoolean(KEY_WATCH_ENABLED, false)
         set(value) = preferences.edit().putBoolean(KEY_WATCH_ENABLED, value).apply()
+
+    var videoQualityMode: VideoQualityMode
+        get() = VideoQualityMode.fromStored(preferences.getString(KEY_VIDEO_QUALITY, null))
+        set(value) = preferences.edit { putString(KEY_VIDEO_QUALITY, value.name) }
+
+    var startWithFrontCamera: Boolean
+        get() = preferences.getBoolean(KEY_FRONT_CAMERA, true)
+        set(value) = preferences.edit { putBoolean(KEY_FRONT_CAMERA, value) }
 
     fun saveBackgroundIssue(message: String) {
         preferences.edit().putString(KEY_BACKGROUND_ISSUE, message.take(240)).apply()
@@ -150,6 +170,8 @@ class AppPreferences(context: Context) {
         private const val KEY_FRIEND_REQUESTS = "friend_requests_v1"
         private const val KEY_BACKGROUND_ISSUE = "background_issue_v1"
         private const val KEY_WATCH_ENABLED = "watch_enabled"
+        private const val KEY_VIDEO_QUALITY = "video_quality_v1"
+        private const val KEY_FRONT_CAMERA = "front_camera_v1"
         private const val KEY_PUSH_ONLY_MIGRATION = "push_only_migration_v1"
         private const val ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
         private val random = SecureRandom()

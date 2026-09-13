@@ -19,6 +19,7 @@ import org.json.JSONObject
 import pl.wideocall.app.data.AppPreferences
 import pl.wideocall.app.data.Contact
 import pl.wideocall.app.data.FriendRequest
+import pl.wideocall.app.data.VideoQualityMode
 import pl.wideocall.app.notifications.CallNotifications
 import pl.wideocall.app.notifications.ChatNotifications
 import pl.wideocall.app.notifications.AppVisibility
@@ -48,6 +49,8 @@ data class AppUiState(
     val displayName: String,
     val contacts: List<Contact>,
     val watchEnabled: Boolean = false,
+    val videoQualityMode: VideoQualityMode = VideoQualityMode.AUTO,
+    val startWithFrontCamera: Boolean = true,
     val contactPresence: Map<String, ContactPresence> = emptyMap(),
     val phase: CallPhase = CallPhase.CONNECTING_SERVER,
     val status: String = "Łączenie…",
@@ -91,6 +94,8 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
             contacts = preferences.contacts(),
             friendRequests = preferences.friendRequests(),
             watchEnabled = preferences.watchEnabled,
+            videoQualityMode = preferences.videoQualityMode,
+            startWithFrontCamera = preferences.startWithFrontCamera,
         )
     )
     val state: StateFlow<AppUiState> = _state.asStateFlow()
@@ -143,6 +148,8 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
             it.copy(
                 displayName = preferences.displayName,
                 watchEnabled = preferences.watchEnabled,
+                videoQualityMode = preferences.videoQualityMode,
+                startWithFrontCamera = preferences.startWithFrontCamera,
                 friendRequests = preferences.friendRequests(),
                 diagnostic = backgroundIssue ?: it.diagnostic,
             )
@@ -153,11 +160,26 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         if (_state.value.chatVisible && _state.value.chatMessages.any { it.openedAt == null }) openChat()
     }
 
-    fun saveSettings(displayName: String, watchEnabled: Boolean) {
+    fun saveSettings(
+        displayName: String,
+        videoQualityMode: VideoQualityMode,
+        startWithFrontCamera: Boolean,
+    ) {
         preferences.displayName = displayName
         // FCM wakes a closed app; a permanent Firebase listener is no longer used.
         preferences.watchEnabled = false
-        _state.update { it.copy(displayName = preferences.displayName, watchEnabled = false) }
+        preferences.videoQualityMode = videoQualityMode
+        preferences.startWithFrontCamera = startWithFrontCamera
+        _state.update {
+            it.copy(
+                displayName = preferences.displayName,
+                watchEnabled = false,
+                videoQualityMode = preferences.videoQualityMode,
+                startWithFrontCamera = preferences.startWithFrontCamera,
+                status = "Ustawienia zapisane",
+                diagnostic = null,
+            )
+        }
     }
 
     private fun addContact(name: String, id: String) {
