@@ -134,10 +134,12 @@ const senderId = userId();
 const recipientId = userId();
 const invitedId = userId();
 const cancelledId = userId();
+const cancelledInvitationId = userId();
 const senderKey = identity();
 const recipientKey = identity();
 const invitedKey = identity();
 const cancelledKey = identity();
+const cancelledInvitationKey = identity();
 const [sender, recipient] = await Promise.all([connect(senderId, senderKey), connect(recipientId, recipientKey)]);
 
 const received = nextSignal(recipient, "Signal forwarding timed out");
@@ -191,8 +193,26 @@ sender.send(JSON.stringify({
 await nextAcknowledgement(sender);
 const cancelled = await connect(cancelledId, cancelledKey);
 await expectNoSignal(cancelled);
+
+const cancelledRequestId = "cancelled-contact-request-123456";
+sender.send(JSON.stringify({
+  type: "signal",
+  signal: signSignal({ type: "contact-request", from: senderId, to: cancelledInvitationId, callId: cancelledRequestId, sessionKind: "contact", reason: "Telefon testowy" }, senderKey),
+}));
+await nextAcknowledgement(sender);
+sender.send(JSON.stringify({
+  type: "signal",
+  signal: signSignal({ type: "contact-cancel", from: senderId, to: cancelledInvitationId, callId: cancelledRequestId, sessionKind: "contact", reason: "Telefon testowy" }, senderKey),
+}));
+await nextAcknowledgement(sender);
+const cancelledInvitation = await connect(cancelledInvitationId, cancelledInvitationKey);
+const queuedCancellation = await nextSignal(cancelledInvitation, "Queued contact cancellation timed out");
+assert.equal(queuedCancellation.type, "contact-cancel");
+assert.equal(queuedCancellation.callId, cancelledRequestId);
+await expectNoSignal(cancelledInvitation);
 sender.close();
 recipient.close();
 invited.close();
 cancelled.close();
-console.log(JSON.stringify({ ok: true, authenticatedWebSockets: 4, signalForwarded: true, queuedInvitation: true, cancelledCallRemoved: true }));
+cancelledInvitation.close();
+console.log(JSON.stringify({ ok: true, authenticatedWebSockets: 5, signalForwarded: true, queuedInvitation: true, cancelledCallRemoved: true, cancelledInvitation: true }));

@@ -43,6 +43,14 @@ class WideocallMessagingService : FirebaseMessagingService() {
             "contact_rejected" -> if (!AppVisibility.isForeground) {
                 FriendNotifications.showResponse(this, false, callerId, callId)
             }
+            "contact_cancelled" -> {
+                val preferences = AppPreferences(this)
+                val request = preferences.friendRequests().firstOrNull {
+                    it.requestId == callId && it.fromId == callerId
+                }
+                if (request != null) preferences.removeFriendRequest(request.requestId)
+                FriendNotifications.cancel(this, callId)
+            }
             "incoming_chat" -> if (!AppVisibility.isForeground) {
                 ChatNotifications.showInvitation(this, callerId, callId)
             }

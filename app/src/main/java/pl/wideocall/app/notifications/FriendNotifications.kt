@@ -27,6 +27,10 @@ object FriendNotifications {
         )
     }
 
+    fun cancel(context: Context, requestId: String) {
+        context.getSystemService(NotificationManager::class.java).cancel(notificationId(requestId))
+    }
+
     private fun show(context: Context, title: String, text: String, requestId: String) {
         val manager = context.getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(

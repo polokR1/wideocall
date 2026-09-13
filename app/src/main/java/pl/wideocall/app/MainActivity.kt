@@ -18,6 +18,7 @@ import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.BackHandler
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -110,12 +111,15 @@ import org.webrtc.EglBase
 import org.webrtc.RendererCommon
 import org.webrtc.SurfaceViewRenderer
 import pl.wideocall.app.call.AppUiState
+import pl.wideocall.app.call.BackNavigationAction
+import pl.wideocall.app.call.BackNavigationPolicy
 import pl.wideocall.app.call.CallPhase
 import pl.wideocall.app.call.CallViewModel
 import pl.wideocall.app.call.TelecomCallBridge
 import pl.wideocall.app.data.AppPreferences
 import pl.wideocall.app.data.Contact
 import pl.wideocall.app.data.FriendRequest
+import pl.wideocall.app.data.SentFriendRequest
 import pl.wideocall.app.data.VideoQualityMode
 import pl.wideocall.app.notifications.CallNotifications
 import pl.wideocall.app.signaling.ContactPresence
@@ -233,6 +237,7 @@ private fun PermissionGate(
     }
 
     val state by viewModel.state.collectAsState()
+    var showExitConfirmation by remember { mutableStateOf(false) }
     SecureChatWindow(
         enabled = state.phase in setOf(CallPhase.CONNECTING_CHAT, CallPhase.IN_CHAT) || state.chatVisible,
     )
@@ -266,14 +271,62 @@ private fun PermissionGate(
             }
         }
     }
-    when (state.phase) {
-        CallPhase.INCOMING -> IncomingCallScreen(state, viewModel, permissionsGranted) {
-            mediaLauncher.launch(requiredMediaPermissions())
+    BackHandler {
+        when (BackNavigationPolicy.resolve(state.phase, state.chatVisible, state.callVisible)) {
+            BackNavigationAction.CLOSE_CHAT -> viewModel.closeChatLocally()
+            BackNavigationAction.HIDE_CALL -> viewModel.hideCallScreen()
+            BackNavigationAction.CONFIRM_EXIT -> showExitConfirmation = true
         }
+    }
+    when (state.phase) {
+        CallPhase.INCOMING -> if (state.callVisible) {
+            IncomingCallScreen(state, viewModel, permissionsGranted) {
+                mediaLauncher.launch(requiredMediaPermissions())
+            }
+        } else HomeScreen(
+            state = state,
+            viewModel = viewModel,
+            permissionsGranted = permissionsGranted,
+            notificationGranted = notificationGranted,
+            fullScreenIntentAllowed = fullScreenIntentAllowed,
+            requestFullScreenIntent = requestFullScreenIntent,
+            requestPermissions = { mediaLauncher.launch(requiredMediaPermissions()) },
+            requestNotifications = {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                }
+            },
+        )
         CallPhase.OUTGOING,
         CallPhase.CONNECTING_CALL,
-        CallPhase.IN_CALL -> VideoCallScreen(state, viewModel)
-        CallPhase.CONNECTING_CHAT -> ChatScreen(state, viewModel)
+        CallPhase.IN_CALL -> if (state.callVisible) VideoCallScreen(state, viewModel) else HomeScreen(
+            state = state,
+            viewModel = viewModel,
+            permissionsGranted = permissionsGranted,
+            notificationGranted = notificationGranted,
+            fullScreenIntentAllowed = fullScreenIntentAllowed,
+            requestFullScreenIntent = requestFullScreenIntent,
+            requestPermissions = { mediaLauncher.launch(requiredMediaPermissions()) },
+            requestNotifications = {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                }
+            },
+        )
+        CallPhase.CONNECTING_CHAT -> if (state.chatVisible) ChatScreen(state, viewModel) else HomeScreen(
+            state = state,
+            viewModel = viewModel,
+            permissionsGranted = permissionsGranted,
+            notificationGranted = notificationGranted,
+            fullScreenIntentAllowed = fullScreenIntentAllowed,
+            requestFullScreenIntent = requestFullScreenIntent,
+            requestPermissions = { mediaLauncher.launch(requiredMediaPermissions()) },
+            requestNotifications = {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                }
+            },
+        )
         CallPhase.IN_CHAT -> if (state.chatVisible) ChatScreen(state, viewModel) else HomeScreen(
             state = state,
             viewModel = viewModel,
@@ -300,6 +353,19 @@ private fun PermissionGate(
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                 }
+            },
+        )
+    }
+    if (showExitConfirmation) {
+        AlertDialog(
+            onDismissRequest = { showExitConfirmation = false },
+            title = { Text("Wyjść z Wideocall?") },
+            text = { Text("Aplikacja zostanie zamknięta. Nadal możesz otrzymywać połączenia przez powiadomienia systemowe.") },
+            confirmButton = {
+                Button(onClick = { context.findActivity()?.finish() }) { Text("Wyjdź") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showExitConfirmation = false }) { Text("Zostań") }
             },
         )
     }
@@ -341,6 +407,7 @@ private fun HomeScreen(
     val context = LocalContext.current
     var showAddContact by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
+    var requestToCancel by remember { mutableStateOf<SentFriendRequest?>(null) }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -383,6 +450,15 @@ private fun HomeScreen(
             item {
                 StatusCard(state, onReconnect = viewModel::connect)
             }
+            if (state.phase in setOf(CallPhase.OUTGOING, CallPhase.INCOMING, CallPhase.CONNECTING_CALL, CallPhase.IN_CALL) && !state.callVisible) {
+                item {
+                    HiddenCallCard(
+                        state = state,
+                        onOpen = viewModel::openCallScreen,
+                        onEnd = viewModel::hangUp,
+                    )
+                }
+            }
             if (state.phase == CallPhase.IN_CHAT && !state.chatVisible) {
                 item { HiddenChatCard(state, viewModel::openChat, viewModel::hangUp) }
             }
@@ -399,6 +475,19 @@ private fun HomeScreen(
             if (!permissionsGranted) {
                 item {
                     PermissionCard(requestPermissions)
+                }
+            }
+            if (state.sentFriendRequests.isNotEmpty()) {
+                item {
+                    Text(
+                        "Wysłane zaproszenia",
+                        modifier = Modifier.padding(top = 8.dp, bottom = 2.dp),
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+                items(state.sentFriendRequests, key = { it.requestId }) { request ->
+                    SentFriendRequestCard(request = request, onCancel = { requestToCancel = request })
                 }
             }
             item {
@@ -452,6 +541,22 @@ private fun HomeScreen(
             onSave = { name, quality, frontCamera ->
                 viewModel.saveSettings(name, quality, frontCamera)
                 showSettings = false
+            },
+        )
+    }
+    requestToCancel?.let { request ->
+        AlertDialog(
+            onDismissRequest = { requestToCancel = null },
+            title = { Text("Cofnąć zaproszenie?") },
+            text = { Text("Zaproszenie wysłane do ${request.toId} zostanie anulowane także na drugim telefonie.") },
+            confirmButton = {
+                Button(onClick = {
+                    viewModel.cancelFriendRequest(request)
+                    requestToCancel = null
+                }) { Text("Cofnij zaproszenie") }
+            },
+            dismissButton = {
+                TextButton(onClick = { requestToCancel = null }) { Text("Anuluj") }
             },
         )
     }
@@ -581,6 +686,55 @@ private fun HiddenChatCard(state: AppUiState, onOpen: () -> Unit, onEnd: () -> U
             }
             TextButton(onClick = onEnd) { Text("Zakończ") }
             Button(onClick = onOpen) { Text("Otwórz") }
+        }
+    }
+}
+
+@Composable
+private fun HiddenCallCard(state: AppUiState, onOpen: () -> Unit, onEnd: () -> Unit) {
+    val title = when (state.phase) {
+        CallPhase.INCOMING -> "Połączenie przychodzące"
+        CallPhase.OUTGOING -> "Dzwonienie…"
+        CallPhase.CONNECTING_CALL -> "Łączenie rozmowy…"
+        else -> "Rozmowa trwa"
+    }
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(title, fontWeight = FontWeight.Bold)
+                Text(
+                    state.remoteName ?: state.remoteId.orEmpty(),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (state.phase != CallPhase.INCOMING) {
+                TextButton(onClick = onEnd) { Text("Zakończ") }
+            }
+            Button(onClick = onOpen) { Text("Otwórz") }
+        }
+    }
+}
+
+@Composable
+private fun SentFriendRequestCard(request: SentFriendRequest, onCancel: () -> Unit) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(request.toId, fontWeight = FontWeight.SemiBold)
+                Text(
+                    "Oczekuje na odpowiedź",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            TextButton(onClick = onCancel) { Text("Cofnij") }
         }
     }
 }

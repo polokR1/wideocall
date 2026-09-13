@@ -2,7 +2,7 @@ const USER_ID = /^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/;
 const SIGNAL_TYPES = new Set([
   "offer", "answer", "ice", "ice-restart-offer", "ice-restart-answer",
   "accepted", "hangup", "reject", "busy",
-  "contact-request", "contact-accept", "contact-reject",
+  "contact-request", "contact-accept", "contact-reject", "contact-cancel",
 ]);
 const SESSION_KINDS = new Set(["video", "chat", "contact"]);
 const MAX_SIGNAL_BYTES = 220_000;
@@ -217,11 +217,7 @@ export class SignalHub {
   async enqueueEvent(signal, ttlMs) {
     const now = Date.now();
     const events = await this.prunePendingEvents(now);
-    const withoutDuplicate = events.filter((event) => !(
-      event.signal?.type === signal.type &&
-      event.signal?.callId === signal.callId &&
-      event.signal?.from === signal.from
-    ));
+    const withoutDuplicate = filterPendingEvents(events, signal);
     withoutDuplicate.push({ signal, expiresAt: now + ttlMs });
     await this.ctx.storage.put("pending_events", withoutDuplicate.slice(-MAX_PENDING_EVENTS));
     await this.scheduleNextAlarm();
@@ -259,7 +255,7 @@ export class SignalHub {
   }
 }
 
-function validateSignal(signal, authenticatedFrom) {
+export function validateSignal(signal, authenticatedFrom) {
   if (!signal || typeof signal !== "object" || Array.isArray(signal)) return false;
   if (!SIGNAL_TYPES.has(signal.type) || signal.from !== authenticatedFrom || !USER_ID.test(signal.from || "") || !USER_ID.test(signal.to || "")) return false;
   if (signal.from === signal.to) return false;
@@ -276,6 +272,16 @@ function validateSignal(signal, authenticatedFrom) {
   if (!isPublicKey(signal.identityKey) || !isSignature(signal.signature)) return false;
   if (JSON.stringify(signal).length > MAX_SIGNAL_BYTES) return false;
   return true;
+}
+
+export function filterPendingEvents(events, signal) {
+  return events.filter((event) => {
+    const queued = event.signal;
+    const sameRequest = queued?.callId === signal.callId && queued?.from === signal.from;
+    const duplicate = sameRequest && queued?.type === signal.type;
+    const cancelledInvitation = signal.type === "contact-cancel" && sameRequest && queued?.type === "contact-request";
+    return !duplicate && !cancelledInvitation;
+  });
 }
 
 function isPublicKey(value) { return typeof value === "string" && value.length >= 100 && value.length <= 512; }
@@ -424,12 +430,13 @@ async function sendFcmWake(env, token, signal) {
   }
 }
 
-function fcmType(signal) {
+export function fcmType(signal) {
   if (signal.type === "offer") return signal.sessionKind === "chat" ? "incoming_chat" : "incoming_call";
   if (signal.type === "hangup" || signal.type === "reject") return signal.sessionKind === "chat" ? "chat_cancelled" : "call_cancelled";
   if (signal.type === "contact-request") return "contact_request";
   if (signal.type === "contact-accept") return "contact_accepted";
   if (signal.type === "contact-reject") return "contact_rejected";
+  if (signal.type === "contact-cancel") return "contact_cancelled";
   return null;
 }
 

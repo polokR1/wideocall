@@ -17,6 +17,12 @@ data class FriendRequest(
     val displayName: String,
 )
 
+data class SentFriendRequest(
+    val requestId: String,
+    val toId: String,
+    val createdAt: Long,
+)
+
 enum class VideoQualityMode {
     AUTO,
     DATA_SAVER,
@@ -142,6 +148,38 @@ class AppPreferences(context: Context) {
         saveFriendRequests(friendRequests().filterNot { it.requestId == requestId })
     }
 
+    fun sentFriendRequests(): List<SentFriendRequest> {
+        val raw = preferences.getString(KEY_SENT_FRIEND_REQUESTS, "[]") ?: "[]"
+        return runCatching {
+            val array = JSONArray(raw)
+            buildList {
+                for (index in 0 until minOf(array.length(), MAX_FRIEND_REQUESTS)) {
+                    val item = array.getJSONObject(index)
+                    val requestId = item.optString("requestId")
+                    val toId = normalizeId(item.optString("toId"))
+                    val createdAt = item.optLong("createdAt")
+                    if (requestId.length !in 8..128 || toId.length != 9 || createdAt <= 0L) continue
+                    add(SentFriendRequest(requestId, toId, createdAt))
+                }
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    fun saveSentFriendRequest(request: SentFriendRequest) {
+        val normalized = request.copy(toId = normalizeId(request.toId))
+        if (normalized.requestId.length !in 8..128 || normalized.toId.length != 9 || normalized.createdAt <= 0L) return
+        saveSentFriendRequests(
+            sentFriendRequests()
+                .filterNot { it.requestId == normalized.requestId || it.toId == normalized.toId }
+                .plus(normalized)
+                .takeLast(MAX_FRIEND_REQUESTS)
+        )
+    }
+
+    fun removeSentFriendRequest(requestId: String) {
+        saveSentFriendRequests(sentFriendRequests().filterNot { it.requestId == requestId })
+    }
+
     private fun saveContacts(contacts: List<Contact>) {
         val array = JSONArray()
         contacts.forEach { contact ->
@@ -163,11 +201,25 @@ class AppPreferences(context: Context) {
         preferences.edit().putString(KEY_FRIEND_REQUESTS, array.toString()).apply()
     }
 
+    private fun saveSentFriendRequests(requests: List<SentFriendRequest>) {
+        val array = JSONArray()
+        requests.forEach { request ->
+            array.put(
+                JSONObject()
+                    .put("requestId", request.requestId)
+                    .put("toId", request.toId)
+                    .put("createdAt", request.createdAt)
+            )
+        }
+        preferences.edit { putString(KEY_SENT_FRIEND_REQUESTS, array.toString()) }
+    }
+
     companion object {
         private const val KEY_MY_ID = "my_id"
         private const val KEY_DISPLAY_NAME = "display_name"
         private const val KEY_CONTACTS = "contacts"
         private const val KEY_FRIEND_REQUESTS = "friend_requests_v1"
+        private const val KEY_SENT_FRIEND_REQUESTS = "sent_friend_requests_v1"
         private const val KEY_BACKGROUND_ISSUE = "background_issue_v1"
         private const val KEY_WATCH_ENABLED = "watch_enabled"
         private const val KEY_VIDEO_QUALITY = "video_quality_v1"

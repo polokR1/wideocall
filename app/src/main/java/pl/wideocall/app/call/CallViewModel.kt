@@ -19,11 +19,13 @@ import org.json.JSONObject
 import pl.wideocall.app.data.AppPreferences
 import pl.wideocall.app.data.Contact
 import pl.wideocall.app.data.FriendRequest
+import pl.wideocall.app.data.SentFriendRequest
 import pl.wideocall.app.data.VideoQualityMode
 import pl.wideocall.app.notifications.CallNotifications
 import pl.wideocall.app.notifications.ChatNotifications
 import pl.wideocall.app.notifications.AppVisibility
 import pl.wideocall.app.notifications.OngoingCallService
+import pl.wideocall.app.notifications.FriendNotifications
 import pl.wideocall.app.signaling.ContactPresence
 import pl.wideocall.app.signaling.SignalMessage
 import pl.wideocall.app.signaling.SignalingClient
@@ -65,6 +67,8 @@ data class AppUiState(
     val safetyNumber: String? = null,
     val peerIdentityVerified: Boolean = false,
     val friendRequests: List<FriendRequest> = emptyList(),
+    val sentFriendRequests: List<SentFriendRequest> = emptyList(),
+    val callVisible: Boolean = true,
     val unreadChatCount: Int = 0,
     val diagnostic: String? = null,
 )
@@ -93,6 +97,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
             displayName = preferences.displayName,
             contacts = preferences.contacts(),
             friendRequests = preferences.friendRequests(),
+            sentFriendRequests = preferences.sentFriendRequests(),
             watchEnabled = preferences.watchEnabled,
             videoQualityMode = preferences.videoQualityMode,
             startWithFrontCamera = preferences.startWithFrontCamera,
@@ -151,6 +156,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 videoQualityMode = preferences.videoQualityMode,
                 startWithFrontCamera = preferences.startWithFrontCamera,
                 friendRequests = preferences.friendRequests(),
+                sentFriendRequests = preferences.sentFriendRequests(),
                 diagnostic = backgroundIssue ?: it.diagnostic,
             )
         }
@@ -200,6 +206,14 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
             _state.update { it.copy(status = "Nie można zaprosić własnego telefonu", diagnostic = "Zaproszenie: podano identyfikator tego urządzenia.") }
             return
         }
+        if (_state.value.contacts.any { it.id == normalizedId }) {
+            _state.update { it.copy(status = "Ten telefon jest już w kontaktach", diagnostic = null) }
+            return
+        }
+        if (_state.value.sentFriendRequests.any { it.toId == normalizedId }) {
+            _state.update { it.copy(status = "Zaproszenie do $normalizedId już oczekuje", diagnostic = null) }
+            return
+        }
         if (_state.value.phase != CallPhase.READY) {
             _state.update { it.copy(diagnostic = "Zaproszenie: usługa sygnalizacji nie jest teraz gotowa.") }
             return
@@ -215,10 +229,45 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 reason = _state.value.displayName.take(80),
             )
         )
+        if (sent) preferences.saveSentFriendRequest(SentFriendRequest(requestId, normalizedId, System.currentTimeMillis()))
         _state.update {
             it.copy(
+                sentFriendRequests = preferences.sentFriendRequests(),
                 status = if (sent) "Zaproszenie wysłane do $normalizedId" else "Nie udało się wysłać zaproszenia",
                 diagnostic = if (sent) null else "Zaproszenie: brak aktywnego połączenia z Cloudflare.",
+            )
+        }
+    }
+
+    fun cancelFriendRequest(request: SentFriendRequest) {
+        val current = _state.value.sentFriendRequests.firstOrNull {
+            it.requestId == request.requestId && it.toId == request.toId
+        } ?: return
+        val sent = signalingClient.send(
+            SignalMessage(
+                type = "contact-cancel",
+                from = _state.value.myId,
+                to = current.toId,
+                callId = current.requestId,
+                sessionKind = SignalMessage.SESSION_CONTACT,
+                reason = _state.value.displayName.take(80),
+            )
+        )
+        if (!sent) {
+            _state.update {
+                it.copy(
+                    status = "Nie udało się cofnąć zaproszenia",
+                    diagnostic = "Zaproszenie: brak aktywnego połączenia z Cloudflare. Spróbuj ponownie.",
+                )
+            }
+            return
+        }
+        preferences.removeSentFriendRequest(current.requestId)
+        _state.update {
+            it.copy(
+                sentFriendRequests = preferences.sentFriendRequests(),
+                status = "Zaproszenie do ${current.toId} cofnięte",
+                diagnostic = null,
             )
         }
     }
@@ -299,10 +348,11 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 remoteName = contact.name,
                 callId = callId,
                 microphoneEnabled = true,
-                frontCamera = true,
+                frontCamera = preferences.startWithFrontCamera,
                 chatMessages = emptyList(),
                 chatReady = false,
                 chatVisible = chatOnly,
+                callVisible = true,
                 unreadChatCount = 0,
                 safetyNumber = null,
                 peerIdentityVerified = false,
@@ -478,6 +528,18 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         _state.update { it.copy(chatVisible = false) }
     }
 
+    fun hideCallScreen() {
+        if (_state.value.phase in setOf(CallPhase.OUTGOING, CallPhase.INCOMING, CallPhase.CONNECTING_CALL, CallPhase.IN_CALL)) {
+            _state.update { it.copy(callVisible = false) }
+        }
+    }
+
+    fun openCallScreen() {
+        if (_state.value.phase in setOf(CallPhase.OUTGOING, CallPhase.INCOMING, CallPhase.CONNECTING_CALL, CallPhase.IN_CALL)) {
+            _state.update { it.copy(callVisible = true) }
+        }
+    }
+
     fun openChat() {
         val now = System.currentTimeMillis()
         val newlyOpened = _state.value.chatMessages.filter { it.openedAt == null }.map { it.id }
@@ -543,6 +605,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
             "contact-request" -> handleFriendRequest(message)
             "contact-accept" -> handleFriendAccepted(message)
             "contact-reject" -> handleFriendRejected(message)
+            "contact-cancel" -> handleFriendCancelled(message)
             "offer" -> handleOffer(message)
             "accepted" -> if (isActiveMessage(message) && _state.value.phase == CallPhase.OUTGOING) {
                 _state.update { it.copy(status = "Odebrano • zestawianie połączenia…", diagnostic = null) }
@@ -774,6 +837,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 chatMessages = emptyList(),
                 chatReady = false,
                 chatVisible = chatOnly,
+                callVisible = true,
             )
         }
         if (AppVisibility.isForeground) {
@@ -821,14 +885,47 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
 
     private fun handleFriendAccepted(message: SignalMessage) {
         val from = message.from ?: return
+        val requestId = message.callId ?: return
         val displayName = message.reason?.trim()?.take(80).orEmpty().ifBlank { from }
+        preferences.removeSentFriendRequest(requestId)
         addContact(displayName, from)
-        _state.update { it.copy(status = "$displayName zaakceptował zaproszenie", diagnostic = null) }
+        _state.update {
+            it.copy(
+                sentFriendRequests = preferences.sentFriendRequests(),
+                status = "$displayName zaakceptował zaproszenie",
+                diagnostic = null,
+            )
+        }
     }
 
     private fun handleFriendRejected(message: SignalMessage) {
         val from = message.from ?: return
-        _state.update { it.copy(status = "$from odrzucił zaproszenie", diagnostic = null) }
+        val requestId = message.callId ?: return
+        preferences.removeSentFriendRequest(requestId)
+        _state.update {
+            it.copy(
+                sentFriendRequests = preferences.sentFriendRequests(),
+                status = "$from odrzucił zaproszenie",
+                diagnostic = null,
+            )
+        }
+    }
+
+    private fun handleFriendCancelled(message: SignalMessage) {
+        val from = message.from ?: return
+        val requestId = message.callId ?: return
+        val request = _state.value.friendRequests.firstOrNull {
+            it.requestId == requestId && it.fromId == from
+        } ?: return
+        preferences.removeFriendRequest(request.requestId)
+        FriendNotifications.cancel(getApplication(), request.requestId)
+        _state.update {
+            it.copy(
+                friendRequests = preferences.friendRequests(),
+                status = "${request.displayName} cofnął zaproszenie",
+                diagnostic = null,
+            )
+        }
     }
 
     private fun failCall(message: String, diagnostic: String = "Połączenie: $message") {
@@ -872,6 +969,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 chatMessages = emptyList(),
                 chatReady = false,
                 chatVisible = false,
+                callVisible = true,
                 unreadChatCount = 0,
                 safetyNumber = null,
                 peerIdentityVerified = false,
@@ -918,6 +1016,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 chatMessages = emptyList(),
                 chatReady = false,
                 chatVisible = false,
+                callVisible = true,
                 unreadChatCount = 0,
                 safetyNumber = null,
                 peerIdentityVerified = false,

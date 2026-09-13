@@ -9,10 +9,11 @@ Prywatny wideotelefon 1:1 na Androida: rozmowy wideo i audio oraz osobny, znikaj
 - Trwałe połączenie WebSocket utrzymuje hibernowalny WebSocket Durable Object; nie powoduje ciągłych odczytów Firebase ani stałego powiadomienia czuwania.
 - Gdy odbiorca zamknął aplikację, Worker przechowuje ofertę sygnalizacyjną maksymalnie 45 sekund i wysyła FCM wyłącznie jako sygnał wybudzenia. Firebase Cloud Messaging pozostaje konieczny, bo Android nie pozwala aplikacji samodzielnie wybudzić innego zamkniętego telefonu.
 - Każdy telefon podpisuje tożsamość i sygnały kluczem ECDSA P-256 z Android Keystore. Pierwszy klucz kontaktu jest przypinany lokalnie (TOFU), a jego późniejsza zmiana zatrzymuje połączenie. Mała zielona ikona potwierdza prawidłowy podpis i nie zasłania rozmowy.
-- Kontakty dodaje się przez podpisane zaproszenie. Odbiorca sam je akceptuje albo odrzuca; zaproszenia oczekujące są szyfrowane w transporcie i przechowywane w Durable Object najwyżej 7 dni.
+- Kontakty dodaje się przez podpisane zaproszenie. Odbiorca sam je akceptuje albo odrzuca, a nadawca może cofnąć oczekujące zaproszenie; anulowanie usuwa je również z drugiego telefonu i jego powiadomień. Zdarzenia oczekujące są szyfrowane w transporcie i przechowywane w Durable Object najwyżej 7 dni.
 - Czat używa szyfrowanego WebRTC DataChannel, nie ma bazy ani historii. Zamknięcie panelu jest lokalne i nie zamyka czatu drugiej osobie. Wiadomość znika na danym telefonie 60 sekund po jej otwarciu. Ekran czatu blokuje systemowe zrzuty i nagrywanie ekranu; nie chroni to przed zdjęciem ekranu drugim urządzeniem ani zmodyfikowanym systemem.
 - Na Wi-Fi aplikacja używa 720p/30 kl./s. Na sieci komórkowej startuje od 360p/15 kl./s i 350 kb/s, aby priorytetem była płynność; WebRTC może później dostosować bitrate. Tor głosowy używa trybu rozmowy, sprzętowego usuwania echa/szumu i niskich opóźnień, jeśli wspiera je telefon.
 - Android Core Telecom integruje aktywną rozmowę z systemowym ekranem połączenia, Bluetooth i regulacją mikrofonu. Podczas aktywnej kamery/mikrofonu Android wymaga widocznego powiadomienia rozmowy — nie jest to opcjonalne ustawienie aplikacji.
+- Przycisk Wstecz z rozmowy lub czatu wraca do ekranu głównego bez natychmiastowego zamykania aplikacji. Dopiero Wstecz na ekranie głównym wyświetla potwierdzenie wyjścia.
 
 ## Cloudflare Worker
 
