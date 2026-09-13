@@ -10,6 +10,12 @@ data class Contact(
     val name: String,
 )
 
+data class FriendRequest(
+    val requestId: String,
+    val fromId: String,
+    val displayName: String,
+)
+
 class AppPreferences(context: Context) {
     private val preferences = context.getSharedPreferences("wideocall", Context.MODE_PRIVATE)
 
@@ -36,6 +42,16 @@ class AppPreferences(context: Context) {
     var watchEnabled: Boolean
         get() = preferences.getBoolean(KEY_WATCH_ENABLED, false)
         set(value) = preferences.edit().putBoolean(KEY_WATCH_ENABLED, value).apply()
+
+    fun saveBackgroundIssue(message: String) {
+        preferences.edit().putString(KEY_BACKGROUND_ISSUE, message.take(240)).apply()
+    }
+
+    fun consumeBackgroundIssue(): String? {
+        val issue = preferences.getString(KEY_BACKGROUND_ISSUE, null)
+        if (issue != null) preferences.edit().remove(KEY_BACKGROUND_ISSUE).apply()
+        return issue
+    }
 
     fun contacts(): List<Contact> {
         val raw = preferences.getString(KEY_CONTACTS, "[]") ?: "[]"
@@ -66,6 +82,46 @@ class AppPreferences(context: Context) {
         saveContacts(contacts().filterNot { it.id == normalizeId(id) })
     }
 
+    fun friendRequests(): List<FriendRequest> {
+        val raw = preferences.getString(KEY_FRIEND_REQUESTS, "[]") ?: "[]"
+        return runCatching {
+            val array = JSONArray(raw)
+            buildList {
+                for (index in 0 until minOf(array.length(), MAX_FRIEND_REQUESTS)) {
+                    val item = array.getJSONObject(index)
+                    val requestId = item.optString("requestId")
+                    val fromId = normalizeId(item.optString("fromId"))
+                    if (requestId.length !in 8..128 || fromId.length != 9) continue
+                    add(
+                        FriendRequest(
+                            requestId = requestId,
+                            fromId = fromId,
+                            displayName = item.optString("displayName").trim().take(80).ifBlank { fromId },
+                        )
+                    )
+                }
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    fun saveFriendRequest(request: FriendRequest) {
+        val normalized = request.copy(
+            fromId = normalizeId(request.fromId),
+            displayName = request.displayName.trim().take(80).ifBlank { normalizeId(request.fromId) },
+        )
+        if (normalized.requestId.length !in 8..128 || normalized.fromId.length != 9) return
+        saveFriendRequests(
+            friendRequests()
+                .filterNot { it.requestId == normalized.requestId || it.fromId == normalized.fromId }
+                .plus(normalized)
+                .takeLast(MAX_FRIEND_REQUESTS)
+        )
+    }
+
+    fun removeFriendRequest(requestId: String) {
+        saveFriendRequests(friendRequests().filterNot { it.requestId == requestId })
+    }
+
     private fun saveContacts(contacts: List<Contact>) {
         val array = JSONArray()
         contacts.forEach { contact ->
@@ -74,14 +130,30 @@ class AppPreferences(context: Context) {
         preferences.edit().putString(KEY_CONTACTS, array.toString()).apply()
     }
 
+    private fun saveFriendRequests(requests: List<FriendRequest>) {
+        val array = JSONArray()
+        requests.forEach { request ->
+            array.put(
+                JSONObject()
+                    .put("requestId", request.requestId)
+                    .put("fromId", request.fromId)
+                    .put("displayName", request.displayName)
+            )
+        }
+        preferences.edit().putString(KEY_FRIEND_REQUESTS, array.toString()).apply()
+    }
+
     companion object {
         private const val KEY_MY_ID = "my_id"
         private const val KEY_DISPLAY_NAME = "display_name"
         private const val KEY_CONTACTS = "contacts"
+        private const val KEY_FRIEND_REQUESTS = "friend_requests_v1"
+        private const val KEY_BACKGROUND_ISSUE = "background_issue_v1"
         private const val KEY_WATCH_ENABLED = "watch_enabled"
         private const val KEY_PUSH_ONLY_MIGRATION = "push_only_migration_v1"
         private const val ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
         private val random = SecureRandom()
+        private const val MAX_FRIEND_REQUESTS = 20
 
         fun normalizeId(value: String): String = value
             .uppercase()

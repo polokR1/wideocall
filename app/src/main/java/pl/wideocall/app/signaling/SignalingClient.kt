@@ -31,6 +31,7 @@ class SignalingClient(
         fun onDisconnected(reason: String)
         fun onMessage(message: SignalMessage)
         fun onPresenceChanged(userId: String, presence: ContactPresence)
+        fun onWarning(message: String)
     }
 
     private val httpClient = OkHttpClient.Builder().pingInterval(20, TimeUnit.SECONDS).build()
@@ -59,7 +60,14 @@ class SignalingClient(
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 if (generation == connectionGeneration && !intentionallyClosed) {
                     ready = false
-                    reportDisconnected("Szybka sygnalizacja została rozłączona")
+                    val detail = when (reason) {
+                        "invalid_signal_signature" -> "serwer odrzucił podpis sygnału"
+                        "authentication_failed" -> "nie udało się potwierdzić tożsamości telefonu"
+                        "delivery_failed" -> "serwer nie dostarczył sygnału"
+                        "invalid_message", "invalid_signal" -> "serwer odrzucił nieprawidłowe dane"
+                        else -> "kod $code${reason.takeIf { it.isNotBlank() }?.let { ", $it" }.orEmpty()}"
+                    }
+                    reportDisconnected("Szybka sygnalizacja została rozłączona: $detail")
                 }
             }
 
@@ -73,8 +81,18 @@ class SignalingClient(
     }
 
     fun send(message: SignalMessage): Boolean {
-        val currentUserId = userId ?: return false
-        if (!ready || message.from != currentUserId || message.to.isNullOrBlank()) return false
+        val currentUserId = userId ?: run {
+            listener.onWarning("Sygnalizacja: brak identyfikatora aktywnej sesji.")
+            return false
+        }
+        if (!ready) {
+            listener.onWarning("Sygnalizacja: WebSocket nie jest jeszcze gotowy.")
+            return false
+        }
+        if (message.from != currentUserId || message.to.isNullOrBlank()) {
+            listener.onWarning("Sygnalizacja: odrzucono nieprawidłowego nadawcę lub odbiorcę.")
+            return false
+        }
         val signed = runCatching {
             val publicKey = IdentityKeyManager.publicKeyBase64()
             message.copy(identityKey = publicKey, signature = IdentityKeyManager.sign(message.signingPayload(publicKey)))
@@ -82,7 +100,9 @@ class SignalingClient(
             reportDisconnected("Nie udało się podpisać danych połączenia", it)
             return false
         }
-        return socket?.send(JSONObject().put("type", "signal").put("signal", JSONObject(signed.toJson())).toString()) == true
+        val sent = socket?.send(JSONObject().put("type", "signal").put("signal", JSONObject(signed.toJson())).toString()) == true
+        if (!sent) listener.onWarning("Sygnalizacja: nie udało się zapisać danych do WebSocketu.")
+        return sent
     }
 
     /** Availability is learned from call outcome, without a database round-trip. */
@@ -105,7 +125,11 @@ class SignalingClient(
     }
 
     private fun handlePacket(webSocket: WebSocket, raw: String) {
-        val packet = runCatching { JSONObject(raw) }.getOrNull() ?: return
+        val packet = runCatching { JSONObject(raw) }.getOrNull() ?: run {
+            listener.onWarning("Sygnalizacja: serwer zwrócił uszkodzoną wiadomość.")
+            webSocket.close(1008, "invalid_packet")
+            return
+        }
         when (packet.optString("type")) {
             "challenge" -> {
                 val id = userId ?: return
@@ -118,11 +142,19 @@ class SignalingClient(
                 ready = true
                 listener.onConnected()
                 com.google.firebase.messaging.FirebaseMessaging.getInstance().token
-                    .addOnSuccessListener { token -> CloudflarePushRegistry.register(context, token) }
+                    .addOnSuccessListener { token ->
+                        CloudflarePushRegistry.register(context, token) { error ->
+                            if (error != null) listener.onWarning(error)
+                        }
+                    }
+                    .addOnFailureListener { listener.onWarning("Powiadomienia: nie udało się pobrać tokenu FCM (${it.javaClass.simpleName}).") }
             }
             "signal" -> packet.optJSONObject("signal")?.let { signal ->
-                runCatching { SignalMessage.fromJson(signal.toString()) }.getOrNull()?.let(listener::onMessage)
+                runCatching { SignalMessage.fromJson(signal.toString()) }
+                    .onSuccess(listener::onMessage)
+                    .onFailure { listener.onWarning("Sygnalizacja: odebrano nieprawidłowy format sygnału.") }
             }
+            "error" -> listener.onWarning("Sygnalizacja Cloudflare: ${packet.optString("code", "nieznany błąd")}.")
         }
     }
 

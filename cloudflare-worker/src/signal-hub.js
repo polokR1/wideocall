@@ -1,7 +1,15 @@
 const USER_ID = /^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/;
-const SIGNAL_TYPES = new Set(["offer", "answer", "ice", "ice-restart-offer", "ice-restart-answer", "hangup", "reject", "busy"]);
+const SIGNAL_TYPES = new Set([
+  "offer", "answer", "ice", "ice-restart-offer", "ice-restart-answer",
+  "accepted", "hangup", "reject", "busy",
+  "contact-request", "contact-accept", "contact-reject",
+]);
+const SESSION_KINDS = new Set(["video", "chat", "contact"]);
 const MAX_SIGNAL_BYTES = 220_000;
 const OFFER_TTL_MS = 45_000;
+const CALL_EVENT_TTL_MS = 2 * 60_000;
+const CONTACT_EVENT_TTL_MS = 7 * 24 * 60 * 60_000;
+const MAX_PENDING_EVENTS = 128;
 const MAX_AUTH_AGE_MS = 5 * 60_000;
 
 /** One hibernatable Durable Object per Wideocall identifier. */
@@ -34,19 +42,25 @@ export class SignalHub {
 
   async webSocketMessage(socket, message) {
     if (typeof message !== "string" || message.length > MAX_SIGNAL_BYTES) return this.close(socket, 1009, "invalid_message");
-    const attachment = socket.deserializeAttachment();
-    const packet = parseJson(message);
-    if (!packet || !attachment?.userId) return this.close(socket, 1008, "invalid_message");
-    if (!attachment.authenticated) {
-      if (packet.type !== "authenticate") return this.close(socket, 1008, "authentication_required");
-      const ok = await this.authenticateSocket(socket, attachment, packet);
-      if (!ok) this.close(socket, 1008, "authentication_failed");
-      return;
+    try {
+      const attachment = socket.deserializeAttachment();
+      const packet = parseJson(message);
+      if (!packet || !attachment?.userId) return this.close(socket, 1008, "invalid_message");
+      if (!attachment.authenticated) {
+        if (packet.type !== "authenticate") return this.close(socket, 1008, "authentication_required");
+        const ok = await this.authenticateSocket(socket, attachment, packet);
+        if (!ok) this.close(socket, 1008, "authentication_failed");
+        return;
+      }
+      if (packet.type === "signal") await this.routeSignal(socket, attachment.userId, packet);
+      else if (packet.type === "register_push") await this.storePushToken(socket, attachment.userId, packet);
+      else if (packet.type === "ping") socket.send(JSON.stringify({ type: "pong" }));
+      else this.close(socket, 1008, "unsupported_message");
+    } catch (error) {
+      console.error(JSON.stringify({ event: "websocket_message_failed", error: error instanceof Error ? error.message : "unknown" }));
+      try { socket.send(JSON.stringify({ type: "error", code: "temporary_failure" })); } catch { /* socket unavailable */ }
+      this.close(socket, 1011, "temporary_failure");
     }
-    if (packet.type === "signal") await this.routeSignal(socket, attachment.userId, packet);
-    else if (packet.type === "register_push") await this.storePushToken(socket, attachment.userId, packet);
-    else if (packet.type === "ping") socket.send(JSON.stringify({ type: "pong" }));
-    else this.close(socket, 1008, "unsupported_message");
   }
 
   webSocketClose(socket) {
@@ -60,6 +74,8 @@ export class SignalHub {
   async alarm() {
     const pending = await this.ctx.storage.get("pending_offer");
     if (pending?.expiresAt <= Date.now()) await this.ctx.storage.delete("pending_offer");
+    await this.prunePendingEvents();
+    await this.scheduleNextAlarm();
   }
 
   async authenticateSocket(socket, attachment, packet) {
@@ -80,6 +96,12 @@ export class SignalHub {
   async routeSignal(socket, from, packet) {
     const signal = packet.signal;
     if (!validateSignal(signal, from)) return this.close(socket, 1008, "invalid_signal");
+    const signatureValid = await verifySignature(
+      signal.identityKey,
+      signalingPayload(signal, signal.identityKey),
+      signal.signature,
+    );
+    if (!signatureValid) return this.close(socket, 1008, "invalid_signal_signature");
     const recipient = this.env.SIGNAL_HUB.getByName(`user:${signal.to}`);
     const response = await recipient.fetch(new Request("https://signal-hub/deliver", {
       method: "POST",
@@ -87,19 +109,29 @@ export class SignalHub {
       body: JSON.stringify(signal),
     }));
     if (!response.ok) return this.close(socket, 1011, "delivery_failed");
-    socket.send(JSON.stringify({ type: "accepted", callId: signal.callId }));
+    const delivery = await response.json();
+    socket.send(JSON.stringify({ type: "accepted", callId: signal.callId, delivered: delivery?.delivered === true }));
   }
 
   async deliver(request) {
-    const signal = parseJson(await request.text());
+    const raw = await readLimitedText(request, MAX_SIGNAL_BYTES);
+    const signal = parseJson(raw);
     if (!validateSignal(signal, signal?.from)) return json({ error: "invalid_signal" }, 400);
     const targets = this.ctx.getWebSockets().filter((socket) => socket.deserializeAttachment()?.authenticated === true);
-    for (const socket of targets) socket.send(JSON.stringify({ type: "signal", signal }));
-    if (targets.length > 0) return json({ delivered: true });
+    let deliveredCount = 0;
+    for (const socket of targets) {
+      try {
+        socket.send(JSON.stringify({ type: "signal", signal }));
+        deliveredCount += 1;
+      } catch (error) {
+        console.log(JSON.stringify({ event: "socket_delivery_failed", type: signal.type, error: error instanceof Error ? error.name : "unknown" }));
+      }
+    }
+    if (deliveredCount > 0) return json({ delivered: true });
     if (signal.type === "offer") {
       const pending = { signals: [signal], callId: signal.callId, expiresAt: Date.now() + OFFER_TTL_MS };
       await this.ctx.storage.put("pending_offer", pending);
-      await this.ctx.storage.setAlarm(pending.expiresAt);
+      await this.scheduleNextAlarm();
       const pushToken = await this.ctx.storage.get("push_token");
       if (typeof pushToken === "string") await sendFcmWake(this.env, pushToken, signal);
     } else if (signal.type === "ice") {
@@ -107,13 +139,25 @@ export class SignalHub {
       if (pending?.callId === signal.callId && pending.expiresAt > Date.now() && pending.signals.length < 64) {
         pending.signals.push(signal);
         await this.ctx.storage.put("pending_offer", pending);
+      } else {
+        await this.enqueueEvent(signal, CALL_EVENT_TTL_MS);
       }
     } else if (signal.type === "hangup" || signal.type === "reject") {
       const pending = await this.ctx.storage.get("pending_offer");
       if (pending?.callId === signal.callId) {
         await this.ctx.storage.delete("pending_offer");
-        await this.ctx.storage.deleteAlarm();
+        const pushToken = await this.ctx.storage.get("push_token");
+        if (typeof pushToken === "string") await sendFcmWake(this.env, pushToken, signal);
+      } else {
+        await this.enqueueEvent(signal, CALL_EVENT_TTL_MS);
       }
+      await this.scheduleNextAlarm();
+    } else if (signal.type.startsWith("contact-")) {
+      await this.enqueueEvent(signal, CONTACT_EVENT_TTL_MS);
+      const pushToken = await this.ctx.storage.get("push_token");
+      if (typeof pushToken === "string") await sendFcmWake(this.env, pushToken, signal);
+    } else {
+      await this.enqueueEvent(signal, CALL_EVENT_TTL_MS);
     }
     return json({ delivered: false });
   }
@@ -158,11 +202,50 @@ export class SignalHub {
     const pending = await this.ctx.storage.get("pending_offer");
     if (!pending || pending.expiresAt <= Date.now()) {
       if (pending) await this.ctx.storage.delete("pending_offer");
-      return;
+    } else {
+      for (const signal of pending.signals) socket.send(JSON.stringify({ type: "signal", signal }));
+      await this.ctx.storage.delete("pending_offer");
     }
-    await this.ctx.storage.delete("pending_offer");
-    await this.ctx.storage.deleteAlarm();
-    for (const signal of pending.signals) socket.send(JSON.stringify({ type: "signal", signal }));
+    const events = await this.prunePendingEvents();
+    if (events.length > 0) {
+      for (const event of events) socket.send(JSON.stringify({ type: "signal", signal: event.signal }));
+      await this.ctx.storage.delete("pending_events");
+    }
+    await this.scheduleNextAlarm();
+  }
+
+  async enqueueEvent(signal, ttlMs) {
+    const now = Date.now();
+    const events = await this.prunePendingEvents(now);
+    const withoutDuplicate = events.filter((event) => !(
+      event.signal?.type === signal.type &&
+      event.signal?.callId === signal.callId &&
+      event.signal?.from === signal.from
+    ));
+    withoutDuplicate.push({ signal, expiresAt: now + ttlMs });
+    await this.ctx.storage.put("pending_events", withoutDuplicate.slice(-MAX_PENDING_EVENTS));
+    await this.scheduleNextAlarm();
+  }
+
+  async prunePendingEvents(now = Date.now()) {
+    const stored = await this.ctx.storage.get("pending_events");
+    const events = Array.isArray(stored)
+      ? stored.filter((event) => event?.signal && Number(event.expiresAt) > now).slice(-MAX_PENDING_EVENTS)
+      : [];
+    if (events.length === 0) await this.ctx.storage.delete("pending_events");
+    else if (!Array.isArray(stored) || events.length !== stored.length) await this.ctx.storage.put("pending_events", events);
+    return events;
+  }
+
+  async scheduleNextAlarm() {
+    const pending = await this.ctx.storage.get("pending_offer");
+    const events = await this.ctx.storage.get("pending_events");
+    const expirations = [
+      Number(pending?.expiresAt),
+      ...(Array.isArray(events) ? events.map((event) => Number(event?.expiresAt)) : []),
+    ].filter((value) => Number.isFinite(value) && value > Date.now());
+    if (expirations.length === 0) await this.ctx.storage.deleteAlarm();
+    else await this.ctx.storage.setAlarm(Math.min(...expirations));
   }
 
   async storePushToken(socket, userId, packet) {
@@ -179,8 +262,17 @@ export class SignalHub {
 function validateSignal(signal, authenticatedFrom) {
   if (!signal || typeof signal !== "object" || Array.isArray(signal)) return false;
   if (!SIGNAL_TYPES.has(signal.type) || signal.from !== authenticatedFrom || !USER_ID.test(signal.from || "") || !USER_ID.test(signal.to || "")) return false;
+  if (signal.from === signal.to) return false;
   if (typeof signal.callId !== "string" || !/^[A-Za-z0-9_-]{8,128}$/.test(signal.callId)) return false;
-  if (!["video", "chat"].includes(signal.sessionKind)) return false;
+  if (!SESSION_KINDS.has(signal.sessionKind)) return false;
+  if (signal.type.startsWith("contact-")) {
+    if (signal.sessionKind !== "contact" || typeof signal.reason !== "string" || signal.reason.trim().length < 1 || signal.reason.length > 80) return false;
+  } else if (signal.sessionKind === "contact") return false;
+  if (["offer", "answer", "ice-restart-offer", "ice-restart-answer"].includes(signal.type)) {
+    if (typeof signal.sdp !== "string" || signal.sdp.length < 1 || signal.sdp.length > 210_000) return false;
+    if (!['offer', 'answer'].includes(signal.sdpType)) return false;
+  }
+  if (signal.type === "ice" && (typeof signal.candidate !== "string" || signal.candidate.length < 1 || signal.candidate.length > 8_192)) return false;
   if (!isPublicKey(signal.identityKey) || !isSignature(signal.signature)) return false;
   if (JSON.stringify(signal).length > MAX_SIGNAL_BYTES) return false;
   return true;
@@ -190,6 +282,56 @@ function isPublicKey(value) { return typeof value === "string" && value.length >
 function isSignature(value) { return typeof value === "string" && value.length >= 80 && value.length <= 512; }
 function parseJson(value) { try { return JSON.parse(value); } catch { return null; } }
 function json(body, status = 200) { return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } }); }
+
+function signalingPayload(signal, publicKey) {
+  return lengthPrefixed([
+    "wideocall-signaling-v1",
+    signal.type || "",
+    signal.from || "",
+    signal.to || "",
+    signal.callId || "",
+    signal.sessionKind || "",
+    signal.sdp || "",
+    signal.sdpType || "",
+    signal.candidate || "",
+    signal.sdpMid || "",
+    signal.sdpMLineIndex == null ? "" : String(signal.sdpMLineIndex),
+    signal.reason || "",
+    publicKey,
+  ]);
+}
+
+async function readLimitedText(request, limit) {
+  const contentLength = Number(request.headers.get("content-length") || "0");
+  if (Number.isFinite(contentLength) && contentLength > limit) return null;
+  const reader = request.body?.getReader();
+  if (!reader) return null;
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > limit) {
+        await reader.cancel();
+        return null;
+      }
+      chunks.push(value);
+    }
+    const bytes = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return new TextDecoder().decode(bytes);
+  } catch {
+    return null;
+  } finally {
+    reader.releaseLock();
+  }
+}
 
 function devicePayload(operation, userId, nonceOrTimestamp, publicKey) {
   return lengthPrefixed(["wideocall-device-auth-v1", operation, userId, nonceOrTimestamp, publicKey]);
@@ -268,14 +410,27 @@ async function sendFcmWake(env, token, signal) {
   try {
     const credentials = JSON.parse(env.FIREBASE_SERVICE_ACCOUNT_JSON);
     const accessToken = await googleAccessToken(credentials);
-    await fetch(`https://fcm.googleapis.com/v1/projects/vidcall-88857/messages:send`, {
+    const type = fcmType(signal);
+    if (!type) return;
+    const contactEvent = signal.sessionKind === "contact";
+    const response = await fetch(`https://fcm.googleapis.com/v1/projects/vidcall-88857/messages:send`, {
       method: "POST",
       headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ message: { token, data: { type: signal.sessionKind === "chat" ? "incoming_chat" : "incoming_call", callerId: signal.from, recipientId: signal.to, callId: signal.callId, sessionKind: signal.sessionKind }, android: { priority: "HIGH", ttl: "35s", collapse_key: `call-${signal.callId}` } } }),
+      body: JSON.stringify({ message: { token, data: { type, callerId: signal.from, recipientId: signal.to, callId: signal.callId, sessionKind: signal.sessionKind }, android: { priority: "HIGH", ttl: contactEvent ? "86400s" : "35s", collapse_key: `${contactEvent ? "contact" : "call"}-${signal.callId}` } } }),
     });
+    if (!response.ok) throw new Error(`FCM_${response.status}`);
   } catch (error) {
-    console.log(JSON.stringify({ event: "wake_failed", error: error instanceof Error ? error.name : "unknown" }));
+    console.log(JSON.stringify({ event: "wake_failed", signalType: signal.type, error: error instanceof Error ? error.message : "unknown" }));
   }
+}
+
+function fcmType(signal) {
+  if (signal.type === "offer") return signal.sessionKind === "chat" ? "incoming_chat" : "incoming_call";
+  if (signal.type === "hangup" || signal.type === "reject") return signal.sessionKind === "chat" ? "chat_cancelled" : "call_cancelled";
+  if (signal.type === "contact-request") return "contact_request";
+  if (signal.type === "contact-accept") return "contact_accepted";
+  if (signal.type === "contact-reject") return "contact_rejected";
+  return null;
 }
 
 async function googleAccessToken(credentials) {

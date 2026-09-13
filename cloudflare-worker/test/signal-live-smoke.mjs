@@ -36,9 +36,23 @@ function identity() {
 function connect(id, key) {
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(`${WS_ORIGIN}/signal/${id}`);
+    socket.pendingSignals = [];
+    socket.signalWaiters = [];
+    socket.pendingAcknowledgements = [];
+    socket.acknowledgementWaiters = [];
     const timeout = setTimeout(() => reject(new Error("WebSocket authentication timed out")), 10_000);
     socket.addEventListener("message", (event) => {
       const packet = JSON.parse(event.data);
+      if (packet.type === "signal") {
+        const waiter = socket.signalWaiters.shift();
+        if (waiter) waiter(packet.signal);
+        else socket.pendingSignals.push(packet.signal);
+      }
+      if (packet.type === "accepted") {
+        const waiter = socket.acknowledgementWaiters.shift();
+        if (waiter) waiter(packet);
+        else socket.pendingAcknowledgements.push(packet);
+      }
       if (packet.type === "challenge") {
         const signature = key.sign(lengthPrefixed(["wideocall-device-auth-v1", "socket", id, packet.nonce, key.publicKey]));
         socket.send(JSON.stringify({ type: "authenticate", userId: id, identityKey: key.publicKey, signature }));
@@ -55,26 +69,81 @@ function connect(id, key) {
   });
 }
 
+function nextAcknowledgement(socket) {
+  if (socket.pendingAcknowledgements.length > 0) return Promise.resolve(socket.pendingAcknowledgements.shift());
+  return new Promise((resolve, reject) => {
+    const receive = (packet) => {
+      clearTimeout(timeout);
+      resolve(packet);
+    };
+    const timeout = setTimeout(() => {
+      socket.acknowledgementWaiters = socket.acknowledgementWaiters.filter((waiter) => waiter !== receive);
+      reject(new Error("Signal acknowledgement timed out"));
+    }, 10_000);
+    socket.acknowledgementWaiters.push(receive);
+  });
+}
+
+function expectNoSignal(socket, waitMs = 1_000) {
+  assert.equal(socket.pendingSignals.length, 0);
+  return new Promise((resolve, reject) => {
+    const receive = (signal) => reject(new Error(`Unexpected queued signal: ${signal.type}`));
+    socket.signalWaiters.push(receive);
+    setTimeout(() => {
+      socket.signalWaiters = socket.signalWaiters.filter((waiter) => waiter !== receive);
+      resolve();
+    }, waitMs);
+  });
+}
+
+function signSignal(signal, key) {
+  const payload = [
+    "wideocall-signaling-v1",
+    signal.type || "",
+    signal.from || "",
+    signal.to || "",
+    signal.callId || "",
+    signal.sessionKind || "",
+    signal.sdp || "",
+    signal.sdpType || "",
+    signal.candidate || "",
+    signal.sdpMid || "",
+    signal.sdpMLineIndex == null ? "" : String(signal.sdpMLineIndex),
+    signal.reason || "",
+    key.publicKey,
+  ];
+  return { ...signal, identityKey: key.publicKey, signature: key.sign(lengthPrefixed(payload)) };
+}
+
+function nextSignal(socket, timeoutMessage) {
+  if (socket.pendingSignals.length > 0) return Promise.resolve(socket.pendingSignals.shift());
+  return new Promise((resolve, reject) => {
+    const receive = (signal) => {
+      clearTimeout(timeout);
+      resolve(signal);
+    };
+    const timeout = setTimeout(() => {
+      socket.signalWaiters = socket.signalWaiters.filter((waiter) => waiter !== receive);
+      reject(new Error(timeoutMessage));
+    }, 10_000);
+    socket.signalWaiters.push(receive);
+  });
+}
+
 const senderId = userId();
 const recipientId = userId();
+const invitedId = userId();
+const cancelledId = userId();
 const senderKey = identity();
 const recipientKey = identity();
+const invitedKey = identity();
+const cancelledKey = identity();
 const [sender, recipient] = await Promise.all([connect(senderId, senderKey), connect(recipientId, recipientKey)]);
 
-const received = new Promise((resolve, reject) => {
-  const timeout = setTimeout(() => reject(new Error("Signal forwarding timed out")), 10_000);
-  recipient.addEventListener("message", (event) => {
-    const packet = JSON.parse(event.data);
-    if (packet.type === "signal") {
-      clearTimeout(timeout);
-      resolve(packet.signal);
-    }
-  });
-});
+const received = nextSignal(recipient, "Signal forwarding timed out");
 
 const callId = "smoke-call-123456";
-const signalPayload = ["wideocall-signaling-v1", "offer", senderId, recipientId, callId, "video", "v=0", "offer", "", "", "", "", senderKey.publicKey];
-const signal = {
+const signal = signSignal({
   type: "offer",
   from: senderId,
   to: recipientId,
@@ -82,15 +151,48 @@ const signal = {
   sessionKind: "video",
   sdp: "v=0",
   sdpType: "offer",
-  identityKey: senderKey.publicKey,
-  signature: senderKey.sign(lengthPrefixed(signalPayload)),
-};
+}, senderKey);
 sender.send(JSON.stringify({ type: "signal", signal }));
 
 const forwarded = await received;
+await nextAcknowledgement(sender);
 assert.equal(forwarded.callId, callId);
 assert.equal(forwarded.from, senderId);
 assert.equal(forwarded.to, recipientId);
+
+const requestId = "contact-request-123456";
+sender.send(JSON.stringify({
+  type: "signal",
+  signal: signSignal({
+    type: "contact-request",
+    from: senderId,
+    to: invitedId,
+    callId: requestId,
+    sessionKind: "contact",
+    reason: "Telefon testowy",
+  }, senderKey),
+}));
+await nextAcknowledgement(sender);
+const invited = await connect(invitedId, invitedKey);
+const queuedInvitation = await nextSignal(invited, "Queued contact invitation timed out");
+assert.equal(queuedInvitation.type, "contact-request");
+assert.equal(queuedInvitation.callId, requestId);
+
+const cancelledCallId = "cancelled-call-123456";
+sender.send(JSON.stringify({
+  type: "signal",
+  signal: signSignal({ type: "offer", from: senderId, to: cancelledId, callId: cancelledCallId, sessionKind: "video", sdp: "v=0", sdpType: "offer" }, senderKey),
+}));
+await nextAcknowledgement(sender);
+sender.send(JSON.stringify({
+  type: "signal",
+  signal: signSignal({ type: "hangup", from: senderId, to: cancelledId, callId: cancelledCallId, sessionKind: "video" }, senderKey),
+}));
+await nextAcknowledgement(sender);
+const cancelled = await connect(cancelledId, cancelledKey);
+await expectNoSignal(cancelled);
 sender.close();
 recipient.close();
-console.log(JSON.stringify({ ok: true, authenticatedWebSockets: 2, signalForwarded: true }));
+invited.close();
+cancelled.close();
+console.log(JSON.stringify({ ok: true, authenticatedWebSockets: 4, signalForwarded: true, queuedInvitation: true, cancelledCallRemoved: true }));

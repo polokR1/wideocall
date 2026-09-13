@@ -18,6 +18,7 @@ import org.webrtc.SurfaceViewRenderer
 import org.json.JSONObject
 import pl.wideocall.app.data.AppPreferences
 import pl.wideocall.app.data.Contact
+import pl.wideocall.app.data.FriendRequest
 import pl.wideocall.app.notifications.CallNotifications
 import pl.wideocall.app.notifications.ChatNotifications
 import pl.wideocall.app.notifications.AppVisibility
@@ -60,6 +61,9 @@ data class AppUiState(
     val chatVisible: Boolean = false,
     val safetyNumber: String? = null,
     val peerIdentityVerified: Boolean = false,
+    val friendRequests: List<FriendRequest> = emptyList(),
+    val unreadChatCount: Int = 0,
+    val diagnostic: String? = null,
 )
 
 data class EphemeralChatMessage(
@@ -67,6 +71,7 @@ data class EphemeralChatMessage(
     val text: String,
     val mine: Boolean,
     val createdAt: Long,
+    val openedAt: Long? = null,
 )
 
 class CallViewModel(application: Application) : AndroidViewModel(application),
@@ -84,6 +89,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
             myId = preferences.myId,
             displayName = preferences.displayName,
             contacts = preferences.contacts(),
+            friendRequests = preferences.friendRequests(),
             watchEnabled = preferences.watchEnabled,
         )
     )
@@ -108,7 +114,12 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
 
         override fun onLost(network: Network) = onMain {
             if (hasActiveSession()) {
-                _state.update { it.copy(status = "Utracono sieć • oczekiwanie na połączenie…") }
+                _state.update {
+                    it.copy(
+                        status = "Utracono sieć • oczekiwanie na połączenie…",
+                        diagnostic = "Sieć: Android zgłosił utratę aktywnego połączenia internetowego.",
+                    )
+                }
             }
         }
     }
@@ -122,17 +133,24 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     fun connect() {
         reconnectJob?.cancel()
         reconnectJob = null
-        _state.update { it.copy(phase = CallPhase.CONNECTING_SERVER, status = "Łączenie z usługą rozmów…") }
+        _state.update { it.copy(phase = CallPhase.CONNECTING_SERVER, status = "Łączenie z usługą rozmów…", diagnostic = null) }
         signalingClient.connect(_state.value.myId)
     }
 
     fun refreshPreferences() {
+        val backgroundIssue = preferences.consumeBackgroundIssue()
         _state.update {
             it.copy(
                 displayName = preferences.displayName,
                 watchEnabled = preferences.watchEnabled,
+                friendRequests = preferences.friendRequests(),
+                diagnostic = backgroundIssue ?: it.diagnostic,
             )
         }
+    }
+
+    fun onAppVisible() {
+        if (_state.value.chatVisible && _state.value.chatMessages.any { it.openedAt == null }) openChat()
     }
 
     fun saveSettings(displayName: String, watchEnabled: Boolean) {
@@ -142,12 +160,84 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         _state.update { it.copy(displayName = preferences.displayName, watchEnabled = false) }
     }
 
-    fun addContact(name: String, id: String) {
+    private fun addContact(name: String, id: String) {
         val normalizedId = AppPreferences.normalizeId(id)
         if (normalizedId.length != 9 || normalizedId == _state.value.myId) return
         preferences.saveContact(Contact(normalizedId, name))
         _state.update { it.copy(contacts = preferences.contacts()) }
         signalingClient.observeContacts(_state.value.contacts.map(Contact::id))
+    }
+
+    fun sendFriendRequest(id: String) {
+        val normalizedId = AppPreferences.normalizeId(id)
+        if (normalizedId.length != 9) {
+            _state.update { it.copy(status = "Nieprawidłowy identyfikator", diagnostic = "Zaproszenie: identyfikator musi mieć format XXXX-XXXX.") }
+            return
+        }
+        if (normalizedId == _state.value.myId) {
+            _state.update { it.copy(status = "Nie można zaprosić własnego telefonu", diagnostic = "Zaproszenie: podano identyfikator tego urządzenia.") }
+            return
+        }
+        if (_state.value.phase != CallPhase.READY) {
+            _state.update { it.copy(diagnostic = "Zaproszenie: usługa sygnalizacji nie jest teraz gotowa.") }
+            return
+        }
+        val requestId = UUID.randomUUID().toString()
+        val sent = signalingClient.send(
+            SignalMessage(
+                type = "contact-request",
+                from = _state.value.myId,
+                to = normalizedId,
+                callId = requestId,
+                sessionKind = SignalMessage.SESSION_CONTACT,
+                reason = _state.value.displayName.take(80),
+            )
+        )
+        _state.update {
+            it.copy(
+                status = if (sent) "Zaproszenie wysłane do $normalizedId" else "Nie udało się wysłać zaproszenia",
+                diagnostic = if (sent) null else "Zaproszenie: brak aktywnego połączenia z Cloudflare.",
+            )
+        }
+    }
+
+    fun acceptFriendRequest(request: FriendRequest) {
+        val sent = signalingClient.send(
+            SignalMessage(
+                type = "contact-accept",
+                from = _state.value.myId,
+                to = request.fromId,
+                callId = request.requestId,
+                sessionKind = SignalMessage.SESSION_CONTACT,
+                reason = _state.value.displayName.take(80),
+            )
+        )
+        if (!sent) {
+            _state.update { it.copy(status = "Nie udało się zaakceptować zaproszenia", diagnostic = "Zaproszenie: brak aktywnego połączenia z Cloudflare.") }
+            return
+        }
+        addContact(request.displayName, request.fromId)
+        preferences.removeFriendRequest(request.requestId)
+        _state.update { it.copy(friendRequests = preferences.friendRequests(), status = "Dodano ${request.displayName}", diagnostic = null) }
+    }
+
+    fun rejectFriendRequest(request: FriendRequest) {
+        val sent = signalingClient.send(
+            SignalMessage(
+                type = "contact-reject",
+                from = _state.value.myId,
+                to = request.fromId,
+                callId = request.requestId,
+                sessionKind = SignalMessage.SESSION_CONTACT,
+                reason = _state.value.displayName.take(80),
+            )
+        )
+        if (!sent) {
+            _state.update { it.copy(status = "Nie udało się odrzucić zaproszenia", diagnostic = "Zaproszenie: brak aktywnego połączenia z Cloudflare.") }
+            return
+        }
+        preferences.removeFriendRequest(request.requestId)
+        _state.update { it.copy(friendRequests = preferences.friendRequests(), status = "Zaproszenie odrzucone", diagnostic = null) }
     }
 
     fun removeContact(id: String) {
@@ -191,19 +281,24 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 chatMessages = emptyList(),
                 chatReady = false,
                 chatVisible = chatOnly,
+                unreadChatCount = 0,
                 safetyNumber = null,
                 peerIdentityVerified = false,
+                diagnostic = null,
             )
         }
         signalingClient.setBusy(true)
         if (!chatOnly) {
-            TelecomCallBridge.registerOutgoing(callId, contact.id)
-            OngoingCallService.start(getApplication(), contact.name, callId)
+            if (!TelecomCallBridge.registerOutgoing(callId, contact.id)) {
+                _state.update { it.copy(diagnostic = "Android Telecom: system nie zarejestrował połączenia wychodzącego.") }
+            }
+            runCatching { OngoingCallService.start(getApplication(), contact.name, callId) }
+                .onFailure { error -> _state.update { it.copy(diagnostic = "Powiadomienie rozmowy: ${error.javaClass.simpleName}.") } }
         }
         startOutgoingTimeout(callId, contact.id)
         prepareWebRtcSession(callId, isCaller = true, withMedia = !chatOnly) {
             webRtcClient.createOffer { offer ->
-                signalingClient.send(
+                val sent = signalingClient.send(
                     SignalMessage(
                         type = "offer",
                         from = _state.value.myId,
@@ -214,19 +309,38 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                         sdp = offer.description,
                     )
                 )
+                if (!sent) failCall("Nie udało się rozpocząć połączenia", "Sygnalizacja: oferta WebRTC nie została wysłana.")
             }
         }
     }
 
     fun acceptIncomingCall() {
         val offer = pendingOffer ?: return
+        notifyCallAccepted(offer)
         TelecomCallBridge.answer(offer.callId ?: return)
         acceptOffer(offer, withMedia = true)
     }
 
     fun acceptIncomingCallFromTelecom() {
         val offer = pendingOffer ?: return
+        notifyCallAccepted(offer)
         acceptOffer(offer, withMedia = true)
+    }
+
+    private fun notifyCallAccepted(offer: SignalMessage) {
+        CallNotifications.cancel(getApplication(), offer.callId)
+        val sent = signalingClient.send(
+            SignalMessage(
+                type = "accepted",
+                from = _state.value.myId,
+                to = offer.from,
+                callId = offer.callId,
+                sessionKind = offer.sessionKind,
+            )
+        )
+        if (!sent) {
+            _state.update { it.copy(diagnostic = "Odbieranie: nie udało się potwierdzić odebrania przez sygnalizację.") }
+        }
     }
 
     private fun acceptOffer(offer: SignalMessage, withMedia: Boolean) {
@@ -254,7 +368,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 pendingIncomingCandidates.forEach(webRtcClient::addRemoteIceCandidate)
                 pendingIncomingCandidates.clear()
                 webRtcClient.createAnswer { answer ->
-                    signalingClient.send(
+                    val sent = signalingClient.send(
                         SignalMessage(
                             type = "answer",
                             from = _state.value.myId,
@@ -265,6 +379,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                             sdp = answer.description,
                         )
                     )
+                    if (!sent) failCall("Nie udało się odebrać połączenia", "Sygnalizacja: odpowiedź WebRTC nie została wysłana.")
                 }
             }
             pendingOffer = null
@@ -277,7 +392,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
 
     private fun rejectIncomingCall(notifyTelecom: Boolean) {
         val offer = pendingOffer
-        if (offer != null) {
+        val rejectionSent = if (offer != null) {
             signalingClient.send(
                 SignalMessage(
                     type = "reject",
@@ -287,11 +402,12 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                     sessionKind = offer.sessionKind,
                 )
             )
-        }
+        } else true
         CallNotifications.cancel(getApplication(), offer?.callId)
         ChatNotifications.cancel(getApplication(), offer?.callId)
         pendingOffer = null
         clearCall("Gotowy", TelecomEnd.NONE)
+        if (!rejectionSent) _state.update { it.copy(diagnostic = "Odrzucanie: druga strona mogła nie otrzymać potwierdzenia.") }
         if (notifyTelecom) TelecomCallBridge.disconnectRejected(offer?.callId)
     }
 
@@ -302,7 +418,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     private fun hangUp(notifyTelecom: Boolean) {
         val callId = activeCallId
         val remoteId = activeRemoteId
-        if (remoteId != null) {
+        val hangupSent = if (remoteId != null) {
             signalingClient.send(
                 SignalMessage(
                     type = "hangup",
@@ -312,11 +428,12 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                     sessionKind = activeSessionKind,
                 )
             )
-        }
+        } else true
         clearCall(
             if (activeSessionKind == SignalMessage.SESSION_CHAT) "Czat zakończony" else "Rozmowa zakończona",
             TelecomEnd.NONE,
         )
+        if (!hangupSent) _state.update { it.copy(diagnostic = "Kończenie: sygnał rozłączenia nie został dostarczony; druga strona zakończy po czasie.") }
         if (notifyTelecom) TelecomCallBridge.disconnectLocal(callId)
     }
 
@@ -332,14 +449,34 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     }
 
     fun toggleChat() {
-        _state.update { it.copy(chatVisible = !it.chatVisible) }
+        if (_state.value.chatVisible) closeChatLocally() else openChat()
+    }
+
+    fun closeChatLocally() {
+        _state.update { it.copy(chatVisible = false) }
+    }
+
+    fun openChat() {
+        val now = System.currentTimeMillis()
+        val newlyOpened = _state.value.chatMessages.filter { it.openedAt == null }.map { it.id }
+        _state.update { current ->
+            current.copy(
+                chatVisible = true,
+                unreadChatCount = 0,
+                chatMessages = current.chatMessages.map { message ->
+                    if (message.openedAt == null) message.copy(openedAt = now) else message
+                },
+            )
+        }
+        newlyOpened.forEach { scheduleMessageExpiry(it, now) }
     }
 
     fun sendChatMessage(raw: String) {
         if (_state.value.phase !in setOf(CallPhase.IN_CALL, CallPhase.IN_CHAT) || !_state.value.chatReady) return
         val text = EphemeralChatPolicy.sanitize(raw)
         if (text.isBlank()) return
-        val message = EphemeralChatMessage(UUID.randomUUID().toString(), text, true, System.currentTimeMillis())
+        val now = System.currentTimeMillis()
+        val message = EphemeralChatMessage(UUID.randomUUID().toString(), text, true, now, now)
         val payload = JSONObject().put("text", message.text).toString()
         if (webRtcClient.sendChatMessage(payload)) addChatMessage(message)
     }
@@ -354,7 +491,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         TurnCredentialProvider.prefetch(_state.value.myId)
         signalingClient.observeContacts(_state.value.contacts.map(Contact::id))
         if (_state.value.phase in listOf(CallPhase.CONNECTING_SERVER, CallPhase.SERVER_ERROR, CallPhase.READY)) {
-            _state.update { it.copy(phase = CallPhase.READY, status = "Gotowy do rozmowy") }
+            _state.update { it.copy(phase = CallPhase.READY, status = "Gotowy do rozmowy", diagnostic = null) }
         } else if (hasActiveSession() && iceConnected) {
             _state.update { it.copy(status = if (activeSessionKind == SignalMessage.SESSION_CHAT) "Szyfrowany czat połączony" else "Połączono") }
         }
@@ -365,7 +502,13 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
             _state.update { it.copy(status = "Połączenie trwa • odnawiam sygnalizację…") }
             scheduleReconnect(preserveActiveSession = true)
         } else if (_state.value.phase == CallPhase.READY || _state.value.phase == CallPhase.CONNECTING_SERVER) {
-            _state.update { it.copy(phase = CallPhase.SERVER_ERROR, status = "$reason • ponawiam połączenie…") }
+            _state.update {
+                it.copy(
+                    phase = CallPhase.SERVER_ERROR,
+                    status = "$reason • ponawiam połączenie…",
+                    diagnostic = "Sygnalizacja Cloudflare: $reason",
+                )
+            }
             scheduleReconnect(preserveActiveSession = false)
         } else {
             failCall("Utracono połączenie z serwerem")
@@ -375,7 +518,13 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     override fun onMessage(message: SignalMessage) = onMain {
         if (!authenticateMessage(message)) return@onMain
         when (message.type) {
+            "contact-request" -> handleFriendRequest(message)
+            "contact-accept" -> handleFriendAccepted(message)
+            "contact-reject" -> handleFriendRejected(message)
             "offer" -> handleOffer(message)
+            "accepted" -> if (isActiveMessage(message) && _state.value.phase == CallPhase.OUTGOING) {
+                _state.update { it.copy(status = "Odebrano • zestawianie połączenia…", diagnostic = null) }
+            }
             "answer" -> if (isActiveMessage(message) && message.sdp != null) {
                 val chatOnly = activeSessionKind == SignalMessage.SESSION_CHAT
                 _state.update {
@@ -443,6 +592,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                     phase = if (chatOnly) CallPhase.IN_CHAT else CallPhase.IN_CALL,
                     status = if (chatOnly) "Szyfrowany czat połączony" else "Połączono",
                     chatVisible = chatOnly || it.chatVisible,
+                    diagnostic = null,
                 )
             }
             callTimeoutJob?.cancel()
@@ -450,7 +600,10 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 val callId = activeCallId
                 val remote = _state.value.remoteName ?: activeRemoteId
                 if (callId != null) TelecomCallBridge.activate(callId)
-                if (callId != null && remote != null) OngoingCallService.start(getApplication(), remote, callId)
+                if (callId != null && remote != null) {
+                    runCatching { OngoingCallService.start(getApplication(), remote, callId) }
+                        .onFailure { error -> _state.update { it.copy(diagnostic = "Powiadomienie rozmowy: ${error.javaClass.simpleName}.") } }
+                }
             }
         } else if (hasActiveSession()) {
             iceConnected = false
@@ -468,9 +621,19 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         val parsed = runCatching {
             val json = JSONObject(message)
             val text = EphemeralChatPolicy.sanitize(json.getString("text"))
-            if (text.isBlank()) null else EphemeralChatMessage(UUID.randomUUID().toString(), text, false, System.currentTimeMillis())
+            val now = System.currentTimeMillis()
+            if (text.isBlank()) null else EphemeralChatMessage(
+                id = UUID.randomUUID().toString(),
+                text = text,
+                mine = false,
+                createdAt = now,
+                openedAt = now.takeIf { _state.value.chatVisible && AppVisibility.isForeground },
+            )
         }.getOrNull() ?: return@onMain
         addChatMessage(parsed)
+        if (!_state.value.chatVisible || !AppVisibility.isForeground) {
+            _state.update { it.copy(unreadChatCount = it.unreadChatCount + 1) }
+        }
         if (!AppVisibility.isForeground && activeSessionKind == SignalMessage.SESSION_CHAT) {
             ChatNotifications.showMessage(
                 getApplication(),
@@ -480,7 +643,11 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         }
     }
 
-    override fun onError(message: String) = onMain { failCall(message) }
+    override fun onError(message: String) = onMain { failCall(message, "WebRTC: $message") }
+
+    override fun onWarning(message: String) = onMain {
+        _state.update { it.copy(diagnostic = message) }
+    }
 
     fun markCurrentPeerVerified() {
         val remoteId = activeRemoteId ?: return
@@ -504,11 +671,13 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
             blockUntrustedMessage(message, "Klucz bezpieczeństwa kontaktu zmienił się — połączenie zablokowane")
             return false
         }
-        _state.update {
-            it.copy(
-                safetyNumber = trust.safetyNumber,
-                peerIdentityVerified = trust.manuallyVerified,
-            )
+        if (!message.type.startsWith("contact-")) {
+            _state.update {
+                it.copy(
+                    safetyNumber = trust.safetyNumber,
+                    peerIdentityVerified = trust.manuallyVerified,
+                )
+            }
         }
         return true
     }
@@ -592,14 +761,69 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         if (chatOnly) {
             acceptOffer(message, withMedia = false)
         } else {
-            TelecomCallBridge.registerIncoming(callId, contact?.name ?: from)
-            CallNotifications.showIncoming(getApplication(), contact?.name ?: from, callId)
+            if (!TelecomCallBridge.registerIncoming(callId, contact?.name ?: from)) {
+                _state.update { it.copy(diagnostic = "Android Telecom: system nie zarejestrował połączenia przychodzącego.") }
+            }
+            runCatching { CallNotifications.showIncoming(getApplication(), contact?.name ?: from, callId) }
+                .onFailure { error -> _state.update { it.copy(diagnostic = "Powiadomienie przychodzące: ${error.javaClass.simpleName}.") } }
             startIncomingTimeout(message.callId)
         }
     }
 
-    private fun failCall(message: String) {
+    private fun handleFriendRequest(message: SignalMessage) {
+        val from = message.from ?: return
+        val requestId = message.callId ?: return
+        val displayName = message.reason?.trim()?.take(80).orEmpty().ifBlank { from }
+        if (_state.value.contacts.any { it.id == from }) {
+            signalingClient.send(
+                SignalMessage(
+                    type = "contact-accept",
+                    from = _state.value.myId,
+                    to = from,
+                    callId = requestId,
+                    sessionKind = SignalMessage.SESSION_CONTACT,
+                    reason = _state.value.displayName.take(80),
+                )
+            )
+            return
+        }
+        preferences.saveFriendRequest(FriendRequest(requestId, from, displayName))
+        _state.update {
+            it.copy(
+                friendRequests = preferences.friendRequests(),
+                status = "Nowe zaproszenie od $displayName",
+                diagnostic = null,
+            )
+        }
+    }
+
+    private fun handleFriendAccepted(message: SignalMessage) {
+        val from = message.from ?: return
+        val displayName = message.reason?.trim()?.take(80).orEmpty().ifBlank { from }
+        addContact(displayName, from)
+        _state.update { it.copy(status = "$displayName zaakceptował zaproszenie", diagnostic = null) }
+    }
+
+    private fun handleFriendRejected(message: SignalMessage) {
+        val from = message.from ?: return
+        _state.update { it.copy(status = "$from odrzucił zaproszenie", diagnostic = null) }
+    }
+
+    private fun failCall(message: String, diagnostic: String = "Połączenie: $message") {
         val callId = activeCallId
+        val remoteId = activeRemoteId
+        if (callId != null && remoteId != null) {
+            signalingClient.send(
+                SignalMessage(
+                    type = "hangup",
+                    from = _state.value.myId,
+                    to = remoteId,
+                    callId = callId,
+                    sessionKind = activeSessionKind,
+                    reason = diagnostic.take(80),
+                )
+            )
+        }
         callTimeoutJob?.cancel()
         iceRecoveryJob?.cancel()
         iceRecoveryJob = null
@@ -626,8 +850,10 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 chatMessages = emptyList(),
                 chatReady = false,
                 chatVisible = false,
+                unreadChatCount = 0,
                 safetyNumber = null,
                 peerIdentityVerified = false,
+                diagnostic = diagnostic,
             )
         }
     }
@@ -670,6 +896,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 chatMessages = emptyList(),
                 chatReady = false,
                 chatVisible = false,
+                unreadChatCount = 0,
                 safetyNumber = null,
                 peerIdentityVerified = false,
             )
@@ -678,9 +905,16 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
 
     private fun addChatMessage(message: EphemeralChatMessage) {
         _state.update { it.copy(chatMessages = (it.chatMessages + message).takeLast(MAX_CHAT_MESSAGES)) }
+        message.openedAt?.let { scheduleMessageExpiry(message.id, it) }
+    }
+
+    private fun scheduleMessageExpiry(messageId: String, openedAt: Long) {
         viewModelScope.launch {
-            delay(EphemeralChatPolicy.LIFETIME_MS)
-            _state.update { current -> current.copy(chatMessages = current.chatMessages.filterNot { it.id == message.id }) }
+            val remaining = (openedAt + EphemeralChatPolicy.LIFETIME_MS - System.currentTimeMillis()).coerceAtLeast(0L)
+            delay(remaining)
+            _state.update { current ->
+                current.copy(chatMessages = current.chatMessages.filterNot { it.id == messageId })
+            }
         }
     }
 
@@ -745,6 +979,11 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         TurnCredentialProvider.get(_state.value.myId) { turnConfiguration ->
             onMain session@{
                 if (activeCallId != callId) return@session
+                if (turnConfiguration == null) {
+                    _state.update {
+                        it.copy(diagnostic = TurnCredentialProvider.diagnostic() ?: "TURN: brak przekaźnika; próbuję połączenia bezpośredniego przez STUN.")
+                    }
+                }
                 runCatching {
                     webRtcClient.prepareSession(isCaller, withMedia, turnConfiguration)
                     onPrepared()

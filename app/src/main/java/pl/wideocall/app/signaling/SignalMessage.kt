@@ -65,6 +65,7 @@ data class SignalMessage(
     companion object {
         const val SESSION_VIDEO = "video"
         const val SESSION_CHAT = "chat"
+        const val SESSION_CONTACT = "contact"
 
         fun fromJson(raw: String): SignalMessage {
             val json = JSONObject(raw)

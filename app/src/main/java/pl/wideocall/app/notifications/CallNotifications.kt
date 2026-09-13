@@ -14,6 +14,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.Person
 import pl.wideocall.app.MainActivity
 import pl.wideocall.app.R
+import pl.wideocall.app.data.AppPreferences
 
 object CallNotifications {
     const val ACTION_ANSWER = "pl.wideocall.app.ANSWER_CALL"
@@ -106,6 +107,11 @@ object CallNotifications {
 
     fun dispatchAction(context: Context, action: String, callerId: String, callId: String) {
         runCatching { callIntent(context, action, callerId, callId, 60).send() }
+            .onFailure { error ->
+                AppPreferences(context).saveBackgroundIssue(
+                    "Sterowanie połączeniem z ekranu blokady: ${error.javaClass.simpleName}.",
+                )
+            }
     }
 
     fun ongoingNotification(context: Context, callerId: String, callId: String): android.app.Notification {

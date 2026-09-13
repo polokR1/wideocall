@@ -8,8 +8,9 @@ import org.junit.Test
 class EphemeralChatPolicyTest {
     @Test
     fun messageExpiresExactlyAfterOneMinute() {
-        assertFalse(EphemeralChatPolicy.isExpired(createdAt = 1_000L, now = 60_999L))
-        assertTrue(EphemeralChatPolicy.isExpired(createdAt = 1_000L, now = 61_000L))
+        assertFalse(EphemeralChatPolicy.isExpired(openedAt = null, now = 100_000L))
+        assertFalse(EphemeralChatPolicy.isExpired(openedAt = 1_000L, now = 60_999L))
+        assertTrue(EphemeralChatPolicy.isExpired(openedAt = 1_000L, now = 61_000L))
     }
 
     @Test

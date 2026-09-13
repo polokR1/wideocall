@@ -14,18 +14,42 @@ class WideocallMessagingService : FirebaseMessagingService() {
 
     override fun onMessageReceived(message: RemoteMessage) {
         if (!BuildConfig.FCM_ENABLED) return
-        val data = message.data
+        runCatching { handleMessage(message.data) }
+            .onFailure { error ->
+                AppPreferences(this).saveBackgroundIssue(
+                    "Powiadomienia w tle: ${error.javaClass.simpleName}. Otwórz aplikację i spróbuj ponownie.",
+                )
+            }
+    }
+
+    private fun handleMessage(data: Map<String, String>) {
         val type = data["type"] ?: return
-        if (type !in setOf("incoming_call", "incoming_chat")) return
         val callerId = data["callerId"] ?: return
         val recipientId = data["recipientId"] ?: return
         val callId = data["callId"] ?: return
-        if (recipientId != AppPreferences(this).myId || AppVisibility.isForeground) return
-        if (type == "incoming_chat") {
-            ChatNotifications.showInvitation(this, callerId, callId)
-        } else {
-            TelecomCallBridge.registerIncoming(callId, callerId)
-            CallNotifications.showIncoming(this, callerId, callId)
+        if (recipientId != AppPreferences(this).myId) return
+        when (type) {
+            "call_cancelled" -> {
+                CallNotifications.cancel(this, callId)
+                TelecomCallBridge.disconnectRemote(callId)
+            }
+            "chat_cancelled" -> ChatNotifications.cancel(this, callId)
+            "contact_request" -> if (!AppVisibility.isForeground) {
+                FriendNotifications.showRequest(this, callerId, callId)
+            }
+            "contact_accepted" -> if (!AppVisibility.isForeground) {
+                FriendNotifications.showResponse(this, true, callerId, callId)
+            }
+            "contact_rejected" -> if (!AppVisibility.isForeground) {
+                FriendNotifications.showResponse(this, false, callerId, callId)
+            }
+            "incoming_chat" -> if (!AppVisibility.isForeground) {
+                ChatNotifications.showInvitation(this, callerId, callId)
+            }
+            "incoming_call" -> if (!AppVisibility.isForeground) {
+                TelecomCallBridge.registerIncoming(callId, callerId)
+                CallNotifications.showIncoming(this, callerId, callId)
+            }
         }
     }
 }

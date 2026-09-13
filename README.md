@@ -8,8 +8,9 @@ Prywatny wideotelefon 1:1 na Androida: rozmowy wideo i audio oraz osobny, znikaj
 - Sygnalizacja WebRTC (oferta, odpowiedź, kandydaci ICE) idzie przez WebSocket Cloudflare Durable Objects. Aplikacja nie używa Firebase Realtime Database ani Firebase Authentication w aktywnym torze rozmowy.
 - Trwałe połączenie WebSocket utrzymuje hibernowalny WebSocket Durable Object; nie powoduje ciągłych odczytów Firebase ani stałego powiadomienia czuwania.
 - Gdy odbiorca zamknął aplikację, Worker przechowuje ofertę sygnalizacyjną maksymalnie 45 sekund i wysyła FCM wyłącznie jako sygnał wybudzenia. Firebase Cloud Messaging pozostaje konieczny, bo Android nie pozwala aplikacji samodzielnie wybudzić innego zamkniętego telefonu.
-- Każdy telefon podpisuje tożsamość i sygnały kluczem ECDSA P-256 z Android Keystore. Pierwszy klucz kontaktu jest przypinany lokalnie (TOFU), a jego późniejsza zmiana zatrzymuje połączenie. Kod bezpieczeństwa pozwala ręcznie porównać tożsamości.
-- Czat używa szyfrowanego WebRTC DataChannel, nie ma bazy ani historii, a wiadomości znikają po 60 sekundach. Ekran czatu blokuje systemowe zrzuty i nagrywanie ekranu; nie chroni to przed zdjęciem ekranu drugim urządzeniem ani zmodyfikowanym systemem.
+- Każdy telefon podpisuje tożsamość i sygnały kluczem ECDSA P-256 z Android Keystore. Pierwszy klucz kontaktu jest przypinany lokalnie (TOFU), a jego późniejsza zmiana zatrzymuje połączenie. Mała zielona ikona potwierdza prawidłowy podpis i nie zasłania rozmowy.
+- Kontakty dodaje się przez podpisane zaproszenie. Odbiorca sam je akceptuje albo odrzuca; zaproszenia oczekujące są szyfrowane w transporcie i przechowywane w Durable Object najwyżej 7 dni.
+- Czat używa szyfrowanego WebRTC DataChannel, nie ma bazy ani historii. Zamknięcie panelu jest lokalne i nie zamyka czatu drugiej osobie. Wiadomość znika na danym telefonie 60 sekund po jej otwarciu. Ekran czatu blokuje systemowe zrzuty i nagrywanie ekranu; nie chroni to przed zdjęciem ekranu drugim urządzeniem ani zmodyfikowanym systemem.
 - Na Wi-Fi aplikacja używa 720p/30 kl./s. Na sieci komórkowej startuje od 360p/15 kl./s i 350 kb/s, aby priorytetem była płynność; WebRTC może później dostosować bitrate. Tor głosowy używa trybu rozmowy, sprzętowego usuwania echa/szumu i niskich opóźnień, jeśli wspiera je telefon.
 - Android Core Telecom integruje aktywną rozmowę z systemowym ekranem połączenia, Bluetooth i regulacją mikrofonu. Podczas aktywnej kamery/mikrofonu Android wymaga widocznego powiadomienia rozmowy — nie jest to opcjonalne ustawienie aplikacji.
 
@@ -40,6 +41,6 @@ APK jest tworzone w `app/build/outputs/apk/debug/app-debug.apk`.
 
 - test na dwóch fizycznych telefonach: Wi-Fi, LTE/5G, przejście Wi-Fi ↔ LTE, Bluetooth oraz ekran blokady;
 - dostarczanie FCM po ubiciu aplikacji przez konkretnego producenta telefonu i po wyłączeniu optymalizacji baterii;
-- ręczne porównanie kodu bezpieczeństwa przy pierwszym kontakcie.
+- odbieranie, odrzucanie i anulowanie połączenia na ekranie blokady u różnych producentów Androida.
 
 Nie należy uruchamiać równocześnie starego katalogu `signaling-server/`; aktualna aplikacja korzysta z Cloudflare.

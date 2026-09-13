@@ -18,6 +18,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import pl.wideocall.app.notifications.CallNotifications
+import pl.wideocall.app.data.AppPreferences
 
 /** Keeps one WebRTC video call registered with Android Telecom. Chat sessions are excluded. */
 object TelecomCallBridge {
@@ -164,8 +165,11 @@ object TelecomCallBridge {
                     }
                     launch { processActions(registration) }
                 }
-            } catch (_: Exception) {
+            } catch (error: Exception) {
                 Log.w(TAG, "Android Telecom rejected the call")
+                applicationContext?.let {
+                    AppPreferences(it).saveBackgroundIssue("Android Telecom: ${error.javaClass.simpleName}.")
+                }
             } finally {
                 clear(registration)
             }
@@ -188,6 +192,9 @@ object TelecomCallBridge {
             }
             if (result is CallControlResult.Error) {
                 Log.w(TAG, "Android Telecom action failed: ${result.errorCode}")
+                applicationContext?.let {
+                    AppPreferences(it).saveBackgroundIssue("Android Telecom: operacja nie powiodła się (kod ${result.errorCode}).")
+                }
             }
             if (action is Action.Disconnect) registration.actions.close()
         }

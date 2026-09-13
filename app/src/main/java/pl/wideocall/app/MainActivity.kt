@@ -49,6 +49,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.CallEnd
 import androidx.compose.material.icons.filled.Cameraswitch
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DeleteOutline
@@ -103,8 +104,10 @@ import org.webrtc.SurfaceViewRenderer
 import pl.wideocall.app.call.AppUiState
 import pl.wideocall.app.call.CallPhase
 import pl.wideocall.app.call.CallViewModel
+import pl.wideocall.app.call.TelecomCallBridge
 import pl.wideocall.app.data.AppPreferences
 import pl.wideocall.app.data.Contact
+import pl.wideocall.app.data.FriendRequest
 import pl.wideocall.app.notifications.CallNotifications
 import pl.wideocall.app.signaling.ContactPresence
 import pl.wideocall.app.ui.theme.WideocallTheme
@@ -165,6 +168,7 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         viewModel.refreshPreferences()
+        viewModel.onAppVisible()
     }
 
     private fun captureNotificationAction(intent: Intent?) {
@@ -179,6 +183,11 @@ class MainActivity : ComponentActivity() {
             )
         ) return
         val callId = intent.getStringExtra(CallNotifications.EXTRA_CALL_ID) ?: return
+        CallNotifications.cancel(this, callId)
+        when (action) {
+            CallNotifications.ACTION_ANSWER -> TelecomCallBridge.answer(callId)
+            CallNotifications.ACTION_DECLINE -> TelecomCallBridge.disconnectRejected(callId)
+        }
         notificationAction.value = NotificationAction(action, callId)
     }
 
@@ -222,7 +231,7 @@ private fun PermissionGate(
         if (action.callId != state.callId) return@LaunchedEffect
         when (action.action) {
             CallNotifications.ACTION_ANSWER -> if (state.phase == CallPhase.INCOMING && permissionsGranted) {
-                viewModel.acceptIncomingCall()
+                viewModel.acceptIncomingCallFromTelecom()
                 consumeNotificationAction()
             }
             CallNotifications.ACTION_TELECOM_ANSWER -> if (state.phase == CallPhase.INCOMING && permissionsGranted) {
@@ -230,7 +239,7 @@ private fun PermissionGate(
                 consumeNotificationAction()
             }
             CallNotifications.ACTION_DECLINE -> if (state.phase == CallPhase.INCOMING) {
-                viewModel.rejectIncomingCall()
+                viewModel.rejectIncomingCallFromTelecom()
                 consumeNotificationAction()
             }
             CallNotifications.ACTION_TELECOM_DECLINE -> if (state.phase == CallPhase.INCOMING) {
@@ -254,8 +263,15 @@ private fun PermissionGate(
         CallPhase.OUTGOING,
         CallPhase.CONNECTING_CALL,
         CallPhase.IN_CALL -> VideoCallScreen(state, viewModel)
-        CallPhase.CONNECTING_CHAT,
-        CallPhase.IN_CHAT -> ChatScreen(state, viewModel)
+        CallPhase.CONNECTING_CHAT -> ChatScreen(state, viewModel)
+        CallPhase.IN_CHAT -> if (state.chatVisible) ChatScreen(state, viewModel) else HomeScreen(
+            state = state,
+            viewModel = viewModel,
+            permissionsGranted = permissionsGranted,
+            fullScreenIntentAllowed = fullScreenIntentAllowed,
+            requestFullScreenIntent = requestFullScreenIntent,
+            requestPermissions = { mediaLauncher.launch(requiredMediaPermissions()) },
+        )
         else -> HomeScreen(
             state = state,
             viewModel = viewModel,
@@ -343,6 +359,9 @@ private fun HomeScreen(
             item {
                 StatusCard(state, onReconnect = viewModel::connect)
             }
+            if (state.phase == CallPhase.IN_CHAT && !state.chatVisible) {
+                item { HiddenChatCard(state, viewModel::openChat, viewModel::hangUp) }
+            }
             if (!fullScreenIntentAllowed) {
                 item { FullScreenCallCard(requestFullScreenIntent) }
             }
@@ -389,8 +408,8 @@ private fun HomeScreen(
     if (showAddContact) {
         AddContactDialog(
             onDismiss = { showAddContact = false },
-            onSave = { name, id ->
-                viewModel.addContact(name, id)
+            onSave = { id ->
+                viewModel.sendFriendRequest(id)
                 showAddContact = false
             },
         )
@@ -405,13 +424,20 @@ private fun HomeScreen(
             },
         )
     }
+    state.friendRequests.firstOrNull()?.let { request ->
+        FriendRequestDialog(
+            request = request,
+            onAccept = { viewModel.acceptFriendRequest(request) },
+            onReject = { viewModel.rejectFriendRequest(request) },
+        )
+    }
 }
 
 @Composable
 private fun StatusCard(state: AppUiState, onReconnect: () -> Unit) {
-    val connected = state.phase == CallPhase.READY
+    val connected = state.phase == CallPhase.READY || state.phase == CallPhase.IN_CHAT
     val dotColor = when (state.phase) {
-        CallPhase.READY -> Color(0xFF3DDC97)
+        CallPhase.READY, CallPhase.IN_CHAT -> Color(0xFF3DDC97)
         CallPhase.CONNECTING_SERVER -> Color(0xFFFFC857)
         else -> Color(0xFFFF6B6B)
     }
@@ -422,8 +448,22 @@ private fun StatusCard(state: AppUiState, onReconnect: () -> Unit) {
         ) {
             Box(Modifier.size(10.dp).background(dotColor, CircleShape))
             Column(Modifier.padding(start = 12.dp).weight(1f)) {
-                Text(if (connected) "Dostępny" else "Połączenie z siecią", fontWeight = FontWeight.SemiBold)
+                Text(
+                    when {
+                        state.phase == CallPhase.IN_CHAT -> "Czat działa w tle"
+                        connected -> "Dostępny"
+                        else -> "Połączenie z siecią"
+                    },
+                    fontWeight = FontWeight.SemiBold,
+                )
                 Text(state.status, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                state.diagnostic?.let {
+                    Text(
+                        "Szczegóły: $it",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
             }
             if (state.phase == CallPhase.SERVER_ERROR) {
                 IconButton(onClick = onReconnect) { Icon(Icons.Default.Refresh, "Połącz ponownie") }
@@ -491,6 +531,44 @@ private fun EmptyContactsCard(onAdd: () -> Unit) {
         Spacer(Modifier.height(12.dp))
         OutlinedButton(onClick = onAdd) { Text("Dodaj kontakt") }
     }
+}
+
+@Composable
+private fun HiddenChatCard(state: AppUiState, onOpen: () -> Unit, onEnd: () -> Unit) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(Icons.Default.Lock, null, tint = MaterialTheme.colorScheme.primary)
+            Column(Modifier.padding(start = 10.dp).weight(1f)) {
+                Text(state.remoteName ?: state.remoteId.orEmpty(), fontWeight = FontWeight.SemiBold)
+                Text(
+                    if (state.unreadChatCount > 0) "Nowe wiadomości: ${state.unreadChatCount}" else "Szyfrowany czat działa w tle",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            TextButton(onClick = onEnd) { Text("Zakończ") }
+            Button(onClick = onOpen) { Text("Otwórz") }
+        }
+    }
+}
+
+@Composable
+private fun FriendRequestDialog(
+    request: FriendRequest,
+    onAccept: () -> Unit,
+    onReject: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = { },
+        title = { Text("Zaproszenie do kontaktów") },
+        text = {
+            Text("${request.displayName} (${request.fromId}) chce dodać Cię do kontaktów.")
+        },
+        confirmButton = { Button(onClick = onAccept) { Text("Akceptuj") } },
+        dismissButton = { TextButton(onClick = onReject) { Text("Odrzuć") } },
+    )
 }
 
 @Composable
@@ -588,27 +666,23 @@ private fun ChatScreen(state: AppUiState, viewModel: CallViewModel) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            IconButton(onClick = viewModel::hangUp) {
-                Icon(Icons.Default.Close, "Zakończ czat")
+            IconButton(onClick = viewModel::closeChatLocally) {
+                Icon(Icons.Default.Close, "Zamknij czat lokalnie")
             }
         }
         Spacer(Modifier.height(12.dp))
-        SecurityCodePanel(
-            state = state,
-            onVerified = viewModel::markCurrentPeerVerified,
-            modifier = Modifier.fillMaxWidth(),
-        )
+        SecurityStatusIcon(state)
         Spacer(Modifier.height(12.dp))
         EphemeralChatPanel(
             state = state,
-            onClose = viewModel::hangUp,
+            onClose = viewModel::closeChatLocally,
             onSend = viewModel::sendChatMessage,
             sendEnabled = state.phase == CallPhase.IN_CHAT && state.chatReady,
             modifier = Modifier.fillMaxWidth(),
         )
         Spacer(Modifier.height(12.dp))
         Text(
-            "Treść nie jest zapisywana w bazie. Wiadomości są usuwane z obu ekranów po 60 sekundach.",
+            "Treść nie jest zapisywana w bazie. Minuta jest liczona osobno na każdym telefonie od chwili otwarcia wiadomości.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -688,12 +762,7 @@ private fun VideoCallScreen(state: AppUiState, viewModel: CallViewModel) {
         ) {
             Text(state.remoteName ?: state.remoteId.orEmpty(), color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
             Text(state.status, color = Color.White.copy(alpha = .7f))
-            SecurityCodePanel(
-                state = state,
-                onVerified = viewModel::markCurrentPeerVerified,
-                modifier = Modifier.padding(top = 8.dp).fillMaxWidth(.62f),
-                dark = true,
-            )
+            SecurityStatusIcon(state, modifier = Modifier.padding(top = 8.dp), dark = true)
         }
         if (state.chatVisible) {
             EphemeralChatPanel(
@@ -741,43 +810,26 @@ private fun VideoCallScreen(state: AppUiState, viewModel: CallViewModel) {
 }
 
 @Composable
-private fun SecurityCodePanel(
+private fun SecurityStatusIcon(
     state: AppUiState,
-    onVerified: () -> Unit,
     modifier: Modifier = Modifier,
     dark: Boolean = false,
 ) {
-    val safetyNumber = state.safetyNumber ?: return
-    val container = if (dark) Color(0xCC101820) else MaterialTheme.colorScheme.surfaceVariant
-    val content = if (dark) Color.White else MaterialTheme.colorScheme.onSurfaceVariant
+    if (state.safetyNumber == null) return
+    val container = if (dark) Color(0xCC173B2E) else Color(0xFFE3F8ED)
+    val content = if (dark) Color(0xFF62E6A7) else Color(0xFF16734A)
     Surface(
-        modifier = modifier,
+        modifier = modifier.size(28.dp),
         color = container,
-        shape = RoundedCornerShape(12.dp),
+        shape = CircleShape,
     ) {
-        Column(Modifier.padding(horizontal = 12.dp, vertical = 9.dp)) {
-            Text(
-                if (state.peerIdentityVerified) "Urządzenie zweryfikowane" else "Kod bezpieczeństwa urządzeń",
-                color = if (state.peerIdentityVerified) Color(0xFF62E6A7) else content,
-                style = MaterialTheme.typography.labelMedium,
-                fontWeight = FontWeight.Bold,
+        Box(contentAlignment = Alignment.Center) {
+            Icon(
+                Icons.Default.CheckCircle,
+                contentDescription = "Tożsamość i szyfrowanie połączenia są prawidłowe",
+                tint = content,
+                modifier = Modifier.size(18.dp),
             )
-            Text(
-                safetyNumber,
-                color = content.copy(alpha = .88f),
-                fontSize = 10.sp,
-                lineHeight = 14.sp,
-            )
-            if (!state.peerIdentityVerified) {
-                Text(
-                    "Porównaj wszystkie cyfry głosowo lub osobiście.",
-                    color = content.copy(alpha = .68f),
-                    style = MaterialTheme.typography.labelSmall,
-                )
-                TextButton(onClick = onVerified) {
-                    Text("Kod jest zgodny")
-                }
-            }
         }
     }
 }
@@ -934,22 +986,14 @@ private fun RoundIconButton(
 }
 
 @Composable
-private fun AddContactDialog(onDismiss: () -> Unit, onSave: (String, String) -> Unit) {
-    var name by remember { mutableStateOf("") }
+private fun AddContactDialog(onDismiss: () -> Unit, onSave: (String) -> Unit) {
     var id by remember { mutableStateOf("") }
     val normalized = pl.wideocall.app.data.AppPreferences.normalizeId(id)
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Nowy kontakt") },
+        title = { Text("Zaproś kontakt") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                OutlinedTextField(
-                    value = name,
-                    onValueChange = { name = it },
-                    label = { Text("Nazwa") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
                 OutlinedTextField(
                     value = id,
                     onValueChange = { id = it.take(9) },
@@ -961,7 +1005,7 @@ private fun AddContactDialog(onDismiss: () -> Unit, onSave: (String, String) -> 
             }
         },
         confirmButton = {
-            Button(onClick = { onSave(name, normalized) }, enabled = normalized.length == 9) { Text("Dodaj") }
+            Button(onClick = { onSave(normalized) }, enabled = normalized.length == 9) { Text("Wyślij zaproszenie") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Anuluj") } },
     )

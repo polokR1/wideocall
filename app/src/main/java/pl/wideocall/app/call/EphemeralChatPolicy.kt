@@ -6,6 +6,6 @@ object EphemeralChatPolicy {
 
     fun sanitize(raw: String): String = raw.trim().take(MAX_LENGTH)
 
-    fun isExpired(createdAt: Long, now: Long): Boolean =
-        now.coerceAtLeast(createdAt) - createdAt >= LIFETIME_MS
+    fun isExpired(openedAt: Long?, now: Long): Boolean =
+        openedAt != null && now.coerceAtLeast(openedAt) - openedAt >= LIFETIME_MS
 }

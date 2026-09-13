@@ -17,8 +17,15 @@ object CloudflarePushRegistry {
         .build()
     private val json = "application/json; charset=utf-8".toMediaType()
 
-    fun register(context: Context, token: String) {
-        if (token.length < 20 || BuildConfig.SIGNALING_HTTP_URL.isBlank()) return
+    fun register(context: Context, token: String, onResult: (String?) -> Unit = {}) {
+        if (token.length < 20) {
+            onResult("Powiadomienia: Firebase zwrócił nieprawidłowy token urządzenia.")
+            return
+        }
+        if (BuildConfig.SIGNALING_HTTP_URL.isBlank()) {
+            onResult("Powiadomienia: brak adresu usługi Cloudflare.")
+            return
+        }
         val body = CloudflareDeviceAuth.request(
             userId = AppPreferences(context).myId,
             operation = "device",
@@ -30,8 +37,15 @@ object CloudflarePushRegistry {
                 .post(body)
                 .build(),
         ).enqueue(object : okhttp3.Callback {
-            override fun onFailure(call: okhttp3.Call, e: java.io.IOException) = Unit
-            override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) = response.close()
+            override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
+                onResult("Powiadomienia: rejestracja telefonu nie powiodła się (${e.javaClass.simpleName}).")
+            }
+
+            override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
+                response.use {
+                    onResult(if (it.isSuccessful) null else "Powiadomienia: Cloudflare odrzucił rejestrację telefonu (HTTP ${it.code}).")
+                }
+            }
         })
     }
 }

@@ -2,7 +2,7 @@
 
 Worker zapewnia sygnalizację WebRTC przez Durable Objects oraz krótkotrwałe dane Cloudflare TURN. Nie przesyła obrazu, dźwięku ani treści czatu.
 
-Każdy identyfikator Wideocall ma własny Durable Object i hibernowalny WebSocket. Telefon najpierw podpisuje wyzwanie ECDSA P-256 z Android Keystore. Pierwszy prawidłowy klucz dla danego identyfikatora jest przypinany po stronie Durable Object; późniejsza zmiana jest odrzucana. Wiadomości sygnalizacyjne są przekazywane natychmiast do aktywnego WebSocketu. Dla zamkniętej aplikacji oferta i kandydaci ICE są przechowywane najwyżej 45 sekund, po czym Worker wysyła FCM jako wybudzenie.
+Każdy identyfikator Wideocall ma własny Durable Object i hibernowalny WebSocket. Telefon najpierw podpisuje wyzwanie ECDSA P-256 z Android Keystore. Pierwszy prawidłowy klucz dla danego identyfikatora jest przypinany po stronie Durable Object; późniejsza zmiana jest odrzucana. Worker sprawdza również podpis każdej wiadomości sygnalizacyjnej. Wiadomości są przekazywane natychmiast do aktywnego WebSocketu. Dla zamkniętej aplikacji oferta i kandydaci ICE są przechowywane najwyżej 45 sekund, kontrolne sygnały rozmowy do 2 minut, a zaproszenia do kontaktów do 7 dni. FCM służy do wybudzenia oraz anulowania nieaktualnego dzwonienia.
 
 Wymagane sekrety Workera:
 
