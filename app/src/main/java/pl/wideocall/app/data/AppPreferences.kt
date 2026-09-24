@@ -23,6 +23,11 @@ data class SentFriendRequest(
     val createdAt: Long,
 )
 
+data class RecentCaller(
+    val id: String,
+    val lastCallAt: Long,
+)
+
 enum class VideoQualityMode {
     AUTO,
     DATA_SAVER,
@@ -106,6 +111,36 @@ class AppPreferences(context: Context) {
 
     fun removeContact(id: String) {
         saveContacts(contacts().filterNot { it.id == normalizeId(id) })
+    }
+
+    fun recentCallers(): List<RecentCaller> {
+        val raw = preferences.getString(KEY_RECENT_CALLERS, "[]") ?: "[]"
+        return runCatching {
+            val array = JSONArray(raw)
+            buildList {
+                for (index in 0 until minOf(array.length(), MAX_RECENT_CALLERS)) {
+                    val item = array.getJSONObject(index)
+                    val id = normalizeId(item.optString("id"))
+                    val lastCallAt = item.optLong("lastCallAt")
+                    if (id.length == 9 && lastCallAt > 0L) add(RecentCaller(id, lastCallAt))
+                }
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    fun saveRecentCaller(id: String, at: Long = System.currentTimeMillis()) {
+        val normalized = normalizeId(id)
+        if (normalized.length != 9 || normalized == myId) return
+        val updated = listOf(RecentCaller(normalized, at)) + recentCallers().filterNot { it.id == normalized }
+        val array = JSONArray()
+        updated.take(MAX_RECENT_CALLERS).forEach { caller ->
+            array.put(JSONObject().put("id", caller.id).put("lastCallAt", caller.lastCallAt))
+        }
+        preferences.edit { putString(KEY_RECENT_CALLERS, array.toString()) }
+    }
+
+    fun clearRecentCallers() {
+        preferences.edit { remove(KEY_RECENT_CALLERS) }
     }
 
     fun friendRequests(): List<FriendRequest> {
@@ -220,6 +255,7 @@ class AppPreferences(context: Context) {
         private const val KEY_CONTACTS = "contacts"
         private const val KEY_FRIEND_REQUESTS = "friend_requests_v1"
         private const val KEY_SENT_FRIEND_REQUESTS = "sent_friend_requests_v1"
+        private const val KEY_RECENT_CALLERS = "recent_callers_v1"
         private const val KEY_BACKGROUND_ISSUE = "background_issue_v1"
         private const val KEY_WATCH_ENABLED = "watch_enabled"
         private const val KEY_VIDEO_QUALITY = "video_quality_v1"
@@ -228,6 +264,7 @@ class AppPreferences(context: Context) {
         private const val ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
         private val random = SecureRandom()
         private const val MAX_FRIEND_REQUESTS = 20
+        private const val MAX_RECENT_CALLERS = 20
 
         fun normalizeId(value: String): String = value
             .uppercase()

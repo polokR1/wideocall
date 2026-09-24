@@ -3,6 +3,7 @@ package pl.wideocall.app.call
 import android.app.Application
 import android.net.ConnectivityManager
 import android.net.Network
+import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
@@ -19,6 +20,7 @@ import org.json.JSONObject
 import pl.wideocall.app.data.AppPreferences
 import pl.wideocall.app.data.Contact
 import pl.wideocall.app.data.FriendRequest
+import pl.wideocall.app.data.RecentCaller
 import pl.wideocall.app.data.SentFriendRequest
 import pl.wideocall.app.data.VideoQualityMode
 import pl.wideocall.app.notifications.CallNotifications
@@ -26,6 +28,11 @@ import pl.wideocall.app.notifications.ChatNotifications
 import pl.wideocall.app.notifications.AppVisibility
 import pl.wideocall.app.notifications.OngoingCallService
 import pl.wideocall.app.notifications.FriendNotifications
+import pl.wideocall.app.notifications.FileTransferNotifications
+import pl.wideocall.app.notifications.DirectFileTransferService
+import pl.wideocall.app.filetransfer.DirectFileTransferManager
+import pl.wideocall.app.filetransfer.FileTransferState
+import pl.wideocall.app.filetransfer.FileTransferStatus
 import pl.wideocall.app.signaling.ContactPresence
 import pl.wideocall.app.signaling.SignalMessage
 import pl.wideocall.app.signaling.SignalingClient
@@ -43,7 +50,11 @@ enum class CallPhase {
     CONNECTING_CALL,
     IN_CALL,
     CONNECTING_CHAT,
+    INCOMING_CHAT,
     IN_CHAT,
+    CONNECTING_FILE,
+    INCOMING_FILE,
+    IN_FILE,
 }
 
 data class AppUiState(
@@ -68,9 +79,12 @@ data class AppUiState(
     val peerIdentityVerified: Boolean = false,
     val friendRequests: List<FriendRequest> = emptyList(),
     val sentFriendRequests: List<SentFriendRequest> = emptyList(),
+    val recentCallers: List<RecentCaller> = emptyList(),
     val callVisible: Boolean = true,
     val unreadChatCount: Int = 0,
     val diagnostic: String? = null,
+    val fileTransfer: FileTransferState? = null,
+    val fileVisible: Boolean = false,
 )
 
 data class EphemeralChatMessage(
@@ -98,12 +112,38 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
             contacts = preferences.contacts(),
             friendRequests = preferences.friendRequests(),
             sentFriendRequests = preferences.sentFriendRequests(),
+            recentCallers = preferences.recentCallers(),
             watchEnabled = preferences.watchEnabled,
             videoQualityMode = preferences.videoQualityMode,
             startWithFrontCamera = preferences.startWithFrontCamera,
         )
     )
     val state: StateFlow<AppUiState> = _state.asStateFlow()
+
+    private val fileTransferManager = DirectFileTransferManager(
+        context = application,
+        scope = viewModelScope,
+        sendText = webRtcClient::sendChatMessage,
+        sendBinary = webRtcClient::sendBinaryMessage,
+        bufferedAmount = webRtcClient::dataChannelBufferedAmount,
+        onState = { transfer ->
+            _state.update {
+                it.copy(
+                    fileTransfer = transfer,
+                    status = when (transfer.status) {
+                        FileTransferStatus.WAITING_FOR_PEER -> "Oczekiwanie na drugi telefon…"
+                        FileTransferStatus.TRANSFERRING -> if (transfer.direction.name == "SEND") "Wysyłanie pliku…" else "Odbieranie pliku…"
+                        FileTransferStatus.VERIFYING -> "Sprawdzanie integralności pliku…"
+                        FileTransferStatus.COMPLETE -> "Transfer pliku zakończony"
+                        FileTransferStatus.CANCELLED -> "Transfer anulowany"
+                        FileTransferStatus.FAILED -> "Transfer pliku nie powiódł się"
+                        FileTransferStatus.IDLE -> it.status
+                    },
+                    diagnostic = transfer.error,
+                )
+            }
+        },
+    )
 
     private var activeCallId: String? = null
     private var activeRemoteId: String? = null
@@ -157,6 +197,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 startWithFrontCamera = preferences.startWithFrontCamera,
                 friendRequests = preferences.friendRequests(),
                 sentFriendRequests = preferences.sentFriendRequests(),
+                recentCallers = preferences.recentCallers(),
                 diagnostic = backgroundIssue ?: it.diagnostic,
             )
         }
@@ -194,6 +235,21 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         preferences.saveContact(Contact(normalizedId, name))
         _state.update { it.copy(contacts = preferences.contacts()) }
         signalingClient.observeContacts(_state.value.contacts.map(Contact::id))
+    }
+
+    fun saveRecentCaller(id: String, name: String) {
+        val normalized = AppPreferences.normalizeId(id)
+        if (normalized.length != 9) {
+            _state.update { it.copy(diagnostic = "Historia połączeń: nieprawidłowy identyfikator rozmówcy.") }
+            return
+        }
+        addContact(name.trim().ifBlank { normalized }, normalized)
+        _state.update { it.copy(status = "Zapisano kontakt", diagnostic = null) }
+    }
+
+    fun clearRecentCallers() {
+        preferences.clearRecentCallers()
+        _state.update { it.copy(recentCallers = emptyList()) }
     }
 
     fun sendFriendRequest(id: String) {
@@ -330,6 +386,24 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         startOutgoingSession(contact, SignalMessage.SESSION_CHAT)
     }
 
+    fun startFileTransfer(contact: Contact, uri: Uri) {
+        if (_state.value.phase != CallPhase.READY) {
+            _state.update { it.copy(diagnostic = "Transfer: aplikacja nie jest teraz gotowa do nowej sesji.") }
+            return
+        }
+        val prepared = fileTransferManager.prepareOutgoing(uri)
+        if (prepared.isFailure) {
+            _state.update {
+                it.copy(
+                    status = "Nie można wysłać pliku",
+                    diagnostic = prepared.exceptionOrNull()?.message ?: "Nieznany błąd wyboru pliku.",
+                )
+            }
+            return
+        }
+        startOutgoingSession(contact, SignalMessage.SESSION_FILE)
+    }
+
     private fun startOutgoingSession(contact: Contact, sessionKind: String) {
         if (_state.value.phase != CallPhase.READY) return
         val callId = UUID.randomUUID().toString()
@@ -340,10 +414,20 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         iceConnected = false
         iceRecoveryJob?.cancel()
         val chatOnly = sessionKind == SignalMessage.SESSION_CHAT
+        val fileOnly = sessionKind == SignalMessage.SESSION_FILE
+        val dataOnly = chatOnly || fileOnly
         _state.update {
             it.copy(
-                phase = if (chatOnly) CallPhase.CONNECTING_CHAT else CallPhase.OUTGOING,
-                status = if (chatOnly) "Łączenie szyfrowanego czatu…" else "Dzwonienie…",
+                phase = when {
+                    chatOnly -> CallPhase.CONNECTING_CHAT
+                    fileOnly -> CallPhase.CONNECTING_FILE
+                    else -> CallPhase.OUTGOING
+                },
+                status = when {
+                    chatOnly -> "Oczekiwanie na otwarcie czatu…"
+                    fileOnly -> "Oczekiwanie na odbiorcę pliku…"
+                    else -> "Dzwonienie…"
+                },
                 remoteId = contact.id,
                 remoteName = contact.name,
                 callId = callId,
@@ -352,6 +436,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 chatMessages = emptyList(),
                 chatReady = false,
                 chatVisible = chatOnly,
+                fileVisible = fileOnly,
                 callVisible = true,
                 unreadChatCount = 0,
                 safetyNumber = null,
@@ -360,15 +445,19 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
             )
         }
         signalingClient.setBusy(true)
-        if (!chatOnly) {
+        if (!dataOnly) {
             if (!TelecomCallBridge.registerOutgoing(callId, contact.id)) {
                 _state.update { it.copy(diagnostic = "Android Telecom: system nie zarejestrował połączenia wychodzącego.") }
             }
             runCatching { OngoingCallService.start(getApplication(), contact.name, callId) }
                 .onFailure { error -> _state.update { it.copy(diagnostic = "Powiadomienie rozmowy: ${error.javaClass.simpleName}.") } }
         }
+        if (fileOnly) {
+            runCatching { DirectFileTransferService.start(getApplication(), contact.name, callId) }
+                .onFailure { error -> _state.update { it.copy(diagnostic = "Transfer w tle: ${error.javaClass.simpleName}.") } }
+        }
         startOutgoingTimeout(callId, contact.id)
-        prepareWebRtcSession(callId, isCaller = true, withMedia = !chatOnly) {
+        prepareWebRtcSession(callId, isCaller = true, withMedia = !dataOnly) {
             webRtcClient.createOffer { offer ->
                 val sent = signalingClient.send(
                     SignalMessage(
@@ -399,6 +488,26 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         acceptOffer(offer, withMedia = true)
     }
 
+    fun acceptIncomingChat(sessionId: String) {
+        val offer = pendingOffer?.takeIf {
+            it.callId == sessionId && it.sessionKind == SignalMessage.SESSION_CHAT
+        } ?: return
+        notifyCallAccepted(offer)
+        _state.update { it.copy(chatVisible = true) }
+        acceptOffer(offer, withMedia = false)
+    }
+
+    fun acceptIncomingFile(sessionId: String) {
+        val offer = pendingOffer?.takeIf {
+            it.callId == sessionId && it.sessionKind == SignalMessage.SESSION_FILE
+        } ?: return
+        notifyCallAccepted(offer)
+        runCatching { DirectFileTransferService.start(getApplication(), _state.value.remoteName ?: offer.from.orEmpty(), sessionId) }
+            .onFailure { error -> _state.update { it.copy(diagnostic = "Transfer w tle: ${error.javaClass.simpleName}.") } }
+        _state.update { it.copy(fileVisible = true) }
+        acceptOffer(offer, withMedia = false)
+    }
+
     private fun notifyCallAccepted(offer: SignalMessage) {
         CallNotifications.cancel(getApplication(), offer.callId)
         val sent = signalingClient.send(
@@ -425,16 +534,28 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         activeIsCaller = false
         iceConnected = false
         iceRecoveryJob?.cancel()
+        val chatOnly = offer.sessionKind == SignalMessage.SESSION_CHAT
+        val fileOnly = offer.sessionKind == SignalMessage.SESSION_FILE
         _state.update {
             it.copy(
-                phase = if (withMedia) CallPhase.CONNECTING_CALL else CallPhase.CONNECTING_CHAT,
-                status = if (withMedia) "Łączenie…" else "Łączenie szyfrowanego czatu…",
-                chatVisible = !withMedia,
+                phase = when {
+                    withMedia -> CallPhase.CONNECTING_CALL
+                    fileOnly -> CallPhase.CONNECTING_FILE
+                    else -> CallPhase.CONNECTING_CHAT
+                },
+                status = when {
+                    withMedia -> "Łączenie…"
+                    fileOnly -> "Łączenie prywatnego transferu…"
+                    else -> "Łączenie szyfrowanego czatu…"
+                },
+                chatVisible = chatOnly,
+                fileVisible = fileOnly,
             )
         }
         callTimeoutJob?.cancel()
         CallNotifications.cancel(getApplication(), offer.callId)
         ChatNotifications.cancel(getApplication(), offer.callId)
+        FileTransferNotifications.cancel(getApplication(), offer.callId)
         prepareWebRtcSession(callId, isCaller = false, withMedia = withMedia) {
             webRtcClient.setRemoteDescription(offer.sdpType ?: "offer", sdp) {
                 pendingIncomingCandidates.forEach(webRtcClient::addRemoteIceCandidate)
@@ -462,6 +583,8 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
 
     fun rejectIncomingCallFromTelecom() = rejectIncomingCall(notifyTelecom = false)
 
+    fun rejectIncomingDataSession() = rejectIncomingCall(notifyTelecom = false)
+
     private fun rejectIncomingCall(notifyTelecom: Boolean) {
         val offer = pendingOffer
         val rejectionSent = if (offer != null) {
@@ -477,6 +600,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         } else true
         CallNotifications.cancel(getApplication(), offer?.callId)
         ChatNotifications.cancel(getApplication(), offer?.callId)
+        FileTransferNotifications.cancel(getApplication(), offer?.callId)
         pendingOffer = null
         clearCall("Gotowy", TelecomEnd.NONE)
         if (!rejectionSent) _state.update { it.copy(diagnostic = "Odrzucanie: druga strona mogła nie otrzymać potwierdzenia.") }
@@ -501,8 +625,15 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 )
             )
         } else true
+        if (activeSessionKind == SignalMessage.SESSION_FILE && _state.value.fileTransfer?.status != FileTransferStatus.COMPLETE) {
+            fileTransferManager.cancel()
+        }
         clearCall(
-            if (activeSessionKind == SignalMessage.SESSION_CHAT) "Czat zakończony" else "Rozmowa zakończona",
+            when (activeSessionKind) {
+                SignalMessage.SESSION_CHAT -> "Czat zakończony"
+                SignalMessage.SESSION_FILE -> "Transfer zakończony"
+                else -> "Rozmowa zakończona"
+            },
             TelecomEnd.NONE,
         )
         if (!hangupSent) _state.update { it.copy(diagnostic = "Kończenie: sygnał rozłączenia nie został dostarczony; druga strona zakończy po czasie.") }
@@ -526,6 +657,41 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
 
     fun closeChatLocally() {
         _state.update { it.copy(chatVisible = false) }
+        val current = _state.value
+        if (activeSessionKind == SignalMessage.SESSION_CHAT && activeCallId != null) {
+            ChatNotifications.showActive(getApplication(), current.remoteName ?: activeRemoteId.orEmpty(), activeCallId)
+        }
+    }
+
+    fun hideFileTransfer() {
+        if (_state.value.phase in setOf(CallPhase.CONNECTING_FILE, CallPhase.IN_FILE) ||
+            (_state.value.phase == CallPhase.READY && _state.value.fileTransfer != null)
+        ) {
+            _state.update { it.copy(fileVisible = false) }
+            // The foreground transfer service keeps the encrypted stream alive while this screen is hidden.
+        }
+    }
+
+    fun openFileTransfer() {
+        if (_state.value.phase in setOf(CallPhase.INCOMING_FILE, CallPhase.CONNECTING_FILE, CallPhase.IN_FILE) ||
+            (_state.value.phase == CallPhase.READY && _state.value.fileTransfer != null)
+        ) {
+            _state.update { it.copy(fileVisible = true) }
+            FileTransferNotifications.cancel(getApplication(), activeCallId)
+        }
+    }
+
+    fun saveReceivedFile(destination: Uri) {
+        fileTransferManager.copyReceivedTo(destination) { result ->
+            onMain {
+                _state.update {
+                    it.copy(
+                        status = if (result.isSuccess) "Plik zapisany na telefonie" else "Nie udało się zapisać pliku",
+                        diagnostic = result.exceptionOrNull()?.message,
+                    )
+                }
+            }
+        }
     }
 
     fun hideCallScreen() {
@@ -553,6 +719,8 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
             )
         }
         newlyOpened.forEach { scheduleMessageExpiry(it, now) }
+        ChatNotifications.cancel(getApplication(), activeCallId)
+        FileTransferNotifications.cancel(getApplication(), activeCallId)
     }
 
     fun sendChatMessage(raw: String) {
@@ -577,7 +745,13 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         if (_state.value.phase in listOf(CallPhase.CONNECTING_SERVER, CallPhase.SERVER_ERROR, CallPhase.READY)) {
             _state.update { it.copy(phase = CallPhase.READY, status = "Gotowy do rozmowy", diagnostic = null) }
         } else if (hasActiveSession() && iceConnected) {
-            _state.update { it.copy(status = if (activeSessionKind == SignalMessage.SESSION_CHAT) "Szyfrowany czat połączony" else "Połączono") }
+            _state.update {
+                it.copy(status = when (activeSessionKind) {
+                    SignalMessage.SESSION_CHAT -> "Szyfrowany czat połączony"
+                    SignalMessage.SESSION_FILE -> "Prywatny transfer połączony"
+                    else -> "Połączono"
+                })
+            }
         }
     }
 
@@ -612,10 +786,19 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
             }
             "answer" -> if (isActiveMessage(message) && message.sdp != null) {
                 val chatOnly = activeSessionKind == SignalMessage.SESSION_CHAT
+                val fileOnly = activeSessionKind == SignalMessage.SESSION_FILE
                 _state.update {
                     it.copy(
-                        phase = if (chatOnly) CallPhase.CONNECTING_CHAT else CallPhase.CONNECTING_CALL,
-                        status = if (chatOnly) "Łączenie szyfrowanego czatu…" else "Łączenie…",
+                        phase = when {
+                            chatOnly -> CallPhase.CONNECTING_CHAT
+                            fileOnly -> CallPhase.CONNECTING_FILE
+                            else -> CallPhase.CONNECTING_CALL
+                        },
+                        status = when {
+                            chatOnly -> "Łączenie szyfrowanego czatu…"
+                            fileOnly -> "Łączenie prywatnego transferu…"
+                            else -> "Łączenie…"
+                        },
                     )
                 }
                 webRtcClient.setRemoteDescription(message.sdpType ?: "answer", message.sdp)
@@ -626,18 +809,26 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
             }
             "ice" -> if (isActiveMessage(message) && message.candidate != null) {
                 val candidate = IceCandidate(message.sdpMid, message.sdpMLineIndex ?: 0, message.candidate)
-                if (_state.value.phase == CallPhase.INCOMING) pendingIncomingCandidates += candidate
+                if (_state.value.phase in setOf(CallPhase.INCOMING, CallPhase.INCOMING_CHAT, CallPhase.INCOMING_FILE)) pendingIncomingCandidates += candidate
                 else webRtcClient.addRemoteIceCandidate(candidate)
             }
             "hangup" -> if (isActiveMessage(message)) {
                 clearCall(
-                    if (activeSessionKind == SignalMessage.SESSION_CHAT) "Rozmówca zakończył czat" else "Rozmówca zakończył rozmowę",
+                    when (activeSessionKind) {
+                        SignalMessage.SESSION_CHAT -> "Rozmówca zakończył czat"
+                        SignalMessage.SESSION_FILE -> "Rozmówca zakończył transfer"
+                        else -> "Rozmówca zakończył rozmowę"
+                    },
                     TelecomEnd.REMOTE,
                 )
             }
             "reject" -> if (isActiveMessage(message)) {
                 clearCall(
-                    if (activeSessionKind == SignalMessage.SESSION_CHAT) "Czat odrzucony" else "Połączenie odrzucone",
+                    when (activeSessionKind) {
+                        SignalMessage.SESSION_CHAT -> "Czat odrzucony"
+                        SignalMessage.SESSION_FILE -> "Transfer odrzucony"
+                        else -> "Połączenie odrzucone"
+                    },
                     TelecomEnd.REJECTED,
                 )
             }
@@ -672,16 +863,26 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
             iceRecoveryJob?.cancel()
             iceRecoveryJob = null
             val chatOnly = activeSessionKind == SignalMessage.SESSION_CHAT
+            val fileOnly = activeSessionKind == SignalMessage.SESSION_FILE
             _state.update {
                 it.copy(
-                    phase = if (chatOnly) CallPhase.IN_CHAT else CallPhase.IN_CALL,
-                    status = if (chatOnly) "Szyfrowany czat połączony" else "Połączono",
+                    phase = when {
+                        chatOnly -> CallPhase.IN_CHAT
+                        fileOnly -> CallPhase.IN_FILE
+                        else -> CallPhase.IN_CALL
+                    },
+                    status = when {
+                        chatOnly -> "Szyfrowany czat połączony"
+                        fileOnly -> "Prywatny transfer połączony"
+                        else -> "Połączono"
+                    },
                     chatVisible = chatOnly || it.chatVisible,
+                    fileVisible = fileOnly || it.fileVisible,
                     diagnostic = null,
                 )
             }
             callTimeoutJob?.cancel()
-            if (!chatOnly) {
+            if (!chatOnly && !fileOnly) {
                 val callId = activeCallId
                 val remote = _state.value.remoteName ?: activeRemoteId
                 if (callId != null) TelecomCallBridge.activate(callId)
@@ -700,9 +901,11 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
 
     override fun onChatReadyChanged(ready: Boolean) = onMain {
         _state.update { it.copy(chatReady = ready) }
+        if (ready && activeSessionKind == SignalMessage.SESSION_FILE) fileTransferManager.onChannelReady()
     }
 
     override fun onChatMessage(message: String) = onMain {
+        if (activeSessionKind == SignalMessage.SESSION_FILE && fileTransferManager.onText(message)) return@onMain
         val parsed = runCatching {
             val json = JSONObject(message)
             val text = EphemeralChatPolicy.sanitize(json.getString("text"))
@@ -719,13 +922,17 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         if (!_state.value.chatVisible || !AppVisibility.isForeground) {
             _state.update { it.copy(unreadChatCount = it.unreadChatCount + 1) }
         }
-        if (!AppVisibility.isForeground && activeSessionKind == SignalMessage.SESSION_CHAT) {
+        if (activeSessionKind == SignalMessage.SESSION_CHAT && (!_state.value.chatVisible || !AppVisibility.isForeground)) {
             ChatNotifications.showMessage(
                 getApplication(),
                 _state.value.remoteName ?: activeRemoteId.orEmpty(),
                 activeCallId,
             )
         }
+    }
+
+    override fun onBinaryMessage(bytes: ByteArray) {
+        if (activeSessionKind == SignalMessage.SESSION_FILE) fileTransferManager.onBinary(bytes)
     }
 
     override fun onError(message: String) = onMain { failCall(message, "WebRTC: $message") }
@@ -827,25 +1034,38 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         iceRecoveryJob?.cancel()
         val contact = _state.value.contacts.firstOrNull { it.id == from }
         val chatOnly = message.sessionKind == SignalMessage.SESSION_CHAT
+        val fileOnly = message.sessionKind == SignalMessage.SESSION_FILE
+        if (!chatOnly && !fileOnly) preferences.saveRecentCaller(from)
         _state.update {
             it.copy(
-                phase = if (chatOnly) CallPhase.CONNECTING_CHAT else CallPhase.INCOMING,
-                status = if (chatOnly) "Otwieranie szyfrowanego czatu…" else "Połączenie przychodzące",
+                phase = when {
+                    chatOnly -> CallPhase.INCOMING_CHAT
+                    fileOnly -> CallPhase.INCOMING_FILE
+                    else -> CallPhase.INCOMING
+                },
+                status = when {
+                    chatOnly -> "Nowe zaproszenie do szyfrowanego czatu"
+                    fileOnly -> "Nowa prośba o bezpośredni transfer pliku"
+                    else -> "Połączenie przychodzące"
+                },
                 remoteId = from,
                 remoteName = contact?.name ?: from,
                 callId = message.callId,
                 chatMessages = emptyList(),
                 chatReady = false,
-                chatVisible = chatOnly,
+                chatVisible = false,
+                fileVisible = false,
                 callVisible = true,
+                recentCallers = preferences.recentCallers(),
             )
-        }
-        if (AppVisibility.isForeground) {
-            if (chatOnly) ChatNotifications.cancel(getApplication(), message.callId)
         }
         signalingClient.setBusy(true)
         if (chatOnly) {
-            acceptOffer(message, withMedia = false)
+            ChatNotifications.showInvitation(getApplication(), contact?.name ?: from, callId)
+            startIncomingTimeout(message.callId)
+        } else if (fileOnly) {
+            FileTransferNotifications.showInvitation(getApplication(), contact?.name ?: from, callId)
+            startIncomingTimeout(message.callId)
         } else {
             if (!TelecomCallBridge.registerIncoming(callId, contact?.name ?: from)) {
                 _state.update { it.copy(diagnostic = "Android Telecom: system nie zarejestrował połączenia przychodzącego.") }
@@ -949,8 +1169,11 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         signalingClient.setBusy(false)
         CallNotifications.cancel(getApplication(), activeCallId)
         ChatNotifications.cancel(getApplication(), activeCallId)
+        FileTransferNotifications.cancel(getApplication(), activeCallId)
         OngoingCallService.stop(getApplication())
+        DirectFileTransferService.stop(getApplication())
         webRtcClient.endCall()
+        fileTransferManager.reset(deleteCompleted = true)
         TelecomCallBridge.disconnectError(callId)
         activeCallId = null
         activeRemoteId = null
@@ -974,20 +1197,26 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 safetyNumber = null,
                 peerIdentityVerified = false,
                 diagnostic = diagnostic,
+                fileTransfer = null,
+                fileVisible = false,
             )
         }
     }
 
     private fun clearCall(status: String, telecomEnd: TelecomEnd = TelecomEnd.LOCAL) {
         val callId = activeCallId
+        val completedTransfer = _state.value.fileTransfer?.takeIf { it.status == FileTransferStatus.COMPLETE }
         callTimeoutJob?.cancel()
         iceRecoveryJob?.cancel()
         iceRecoveryJob = null
         signalingClient.setBusy(false)
         CallNotifications.cancel(getApplication(), activeCallId)
         ChatNotifications.cancel(getApplication(), activeCallId)
+        FileTransferNotifications.cancel(getApplication(), activeCallId)
         OngoingCallService.stop(getApplication())
+        DirectFileTransferService.stop(getApplication())
         webRtcClient.endCall()
+        fileTransferManager.reset(deleteCompleted = completedTransfer == null)
         when (telecomEnd) {
             TelecomEnd.NONE -> Unit
             TelecomEnd.LOCAL -> TelecomCallBridge.disconnectLocal(callId)
@@ -1020,6 +1249,8 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 unreadChatCount = 0,
                 safetyNumber = null,
                 peerIdentityVerified = false,
+                fileTransfer = completedTransfer,
+                fileVisible = false,
             )
         }
     }
@@ -1047,6 +1278,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                     CallPhase.OUTGOING,
                     CallPhase.CONNECTING_CALL,
                     CallPhase.CONNECTING_CHAT,
+                    CallPhase.CONNECTING_FILE,
                 )
             ) {
                 signalingClient.send(
@@ -1059,8 +1291,12 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                     )
                 )
                 clearCall(
-                    if (activeSessionKind == SignalMessage.SESSION_CHAT) "Nie udało się połączyć czatu" else "Nie odebrano",
-                    TelecomEnd.MISSED,
+                    when (activeSessionKind) {
+                        SignalMessage.SESSION_CHAT -> "Nie udało się połączyć czatu"
+                        SignalMessage.SESSION_FILE -> "Nie udało się rozpocząć transferu"
+                        else -> "Nie odebrano"
+                    },
+                    if (activeSessionKind == SignalMessage.SESSION_VIDEO) TelecomEnd.MISSED else TelecomEnd.NONE,
                 )
             }
         }
@@ -1071,9 +1307,18 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         callTimeoutJob?.cancel()
         callTimeoutJob = viewModelScope.launch {
             delay(CALL_TIMEOUT_MS)
-            if (activeCallId == callId && _state.value.phase == CallPhase.INCOMING) {
+            if (activeCallId == callId && _state.value.phase in setOf(CallPhase.INCOMING, CallPhase.INCOMING_CHAT, CallPhase.INCOMING_FILE)) {
                 CallNotifications.cancel(getApplication(), callId)
-                clearCall("Nie odebrano", TelecomEnd.MISSED)
+                ChatNotifications.cancel(getApplication(), callId)
+                FileTransferNotifications.cancel(getApplication(), callId)
+                clearCall(
+                    when (activeSessionKind) {
+                        SignalMessage.SESSION_CHAT -> "Zaproszenie do czatu wygasło"
+                        SignalMessage.SESSION_FILE -> "Prośba o transfer wygasła"
+                        else -> "Nie odebrano"
+                    },
+                    if (activeSessionKind == SignalMessage.SESSION_VIDEO) TelecomEnd.MISSED else TelecomEnd.NONE,
+                )
             }
         }
     }
@@ -1182,10 +1427,14 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     private fun hasActiveSession(): Boolean = activeCallId != null && _state.value.phase in setOf(
         CallPhase.OUTGOING,
         CallPhase.INCOMING,
+        CallPhase.INCOMING_CHAT,
+        CallPhase.INCOMING_FILE,
         CallPhase.CONNECTING_CALL,
         CallPhase.IN_CALL,
         CallPhase.CONNECTING_CHAT,
         CallPhase.IN_CHAT,
+        CallPhase.CONNECTING_FILE,
+        CallPhase.IN_FILE,
     )
 
     private fun onMain(block: () -> Unit) {
@@ -1198,8 +1447,10 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         iceRecoveryJob?.cancel()
         runCatching { connectivityManager.unregisterNetworkCallback(networkCallback) }
         OngoingCallService.stop(getApplication())
+        DirectFileTransferService.stop(getApplication())
         TelecomCallBridge.disconnectLocal(activeCallId)
         signalingClient.close()
+        fileTransferManager.reset(deleteCompleted = true)
         webRtcClient.release()
         TelecomCallBridge.detachListener(this)
         super.onCleared()

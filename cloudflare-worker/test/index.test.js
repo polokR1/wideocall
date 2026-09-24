@@ -44,6 +44,7 @@ test("requires a fresh offer owned by the authenticated Firebase user", () => {
 
 test("accepts chat invitations and keeps legacy video requests compatible", () => {
   assert.equal(validateCallRequest({ ...body, sessionKind: "chat" }), null);
+  assert.equal(validateCallRequest({ ...body, sessionKind: "file" }), null);
   const legacyBody = { ...body };
   delete legacyBody.sessionKind;
   assert.equal(validateCallRequest(legacyBody), null);

@@ -11,6 +11,8 @@ import pl.wideocall.app.MainActivity
 import pl.wideocall.app.R
 
 object ChatNotifications {
+    const val ACTION_OPEN_CHAT = "pl.wideocall.app.action.OPEN_CHAT"
+    const val EXTRA_SESSION_ID = "chat_session_id"
     private const val CHANNEL_ID = "encrypted_chat_secret_v2"
     private const val ID_OFFSET = 31_337
 
@@ -48,15 +50,35 @@ object ChatNotifications {
         )
     }
 
+    fun showActive(context: Context, callerId: String, sessionId: String?) {
+        if (sessionId == null) return
+        show(
+            context = context,
+            title = "Szyfrowany czat jest zminimalizowany",
+            text = "$callerId • dotknij, aby wrócić",
+            sessionId = sessionId,
+            timeoutMs = null,
+            ongoing = true,
+        )
+    }
+
     fun cancel(context: Context, sessionId: String?) {
         if (sessionId == null) return
         context.getSystemService(NotificationManager::class.java).cancel(notificationId(sessionId))
     }
 
-    private fun show(context: Context, title: String, text: String, sessionId: String, timeoutMs: Long) {
+    private fun show(
+        context: Context,
+        title: String,
+        text: String,
+        sessionId: String,
+        timeoutMs: Long?,
+        ongoing: Boolean = false,
+    ) {
         createChannel(context)
         val intent = Intent(context, MainActivity::class.java).apply {
-            action = Intent.ACTION_MAIN
+            action = ACTION_OPEN_CHAT
+            putExtra(EXTRA_SESSION_ID, sessionId)
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
         val open = PendingIntent.getActivity(
@@ -65,7 +87,7 @@ object ChatNotifications {
             intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val notification = NotificationCompat.Builder(context, CHANNEL_ID)
+        val builder = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(title)
             .setContentText(text)
@@ -73,10 +95,10 @@ object ChatNotifications {
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setVisibility(NotificationCompat.VISIBILITY_SECRET)
-            .setAutoCancel(true)
-            .setTimeoutAfter(timeoutMs)
-            .build()
-        context.getSystemService(NotificationManager::class.java).notify(notificationId(sessionId), notification)
+            .setAutoCancel(!ongoing)
+            .setOngoing(ongoing)
+        timeoutMs?.let(builder::setTimeoutAfter)
+        context.getSystemService(NotificationManager::class.java).notify(notificationId(sessionId), builder.build())
     }
 
     private fun notificationId(sessionId: String): Int =

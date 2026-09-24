@@ -51,6 +51,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.CallEnd
 import androidx.compose.material.icons.filled.Cameraswitch
@@ -61,6 +62,8 @@ import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Refresh
@@ -86,6 +89,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -119,9 +123,14 @@ import pl.wideocall.app.call.TelecomCallBridge
 import pl.wideocall.app.data.AppPreferences
 import pl.wideocall.app.data.Contact
 import pl.wideocall.app.data.FriendRequest
+import pl.wideocall.app.data.RecentCaller
 import pl.wideocall.app.data.SentFriendRequest
 import pl.wideocall.app.data.VideoQualityMode
 import pl.wideocall.app.notifications.CallNotifications
+import pl.wideocall.app.notifications.ChatNotifications
+import pl.wideocall.app.notifications.FileTransferNotifications
+import pl.wideocall.app.filetransfer.FileTransferDirection
+import pl.wideocall.app.filetransfer.FileTransferStatus
 import pl.wideocall.app.signaling.ContactPresence
 import pl.wideocall.app.ui.theme.WideocallTheme
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -193,10 +202,18 @@ class MainActivity : ComponentActivity() {
                 CallNotifications.ACTION_TELECOM_ANSWER,
                 CallNotifications.ACTION_TELECOM_DECLINE,
                 CallNotifications.ACTION_TELECOM_HANG_UP,
+                ChatNotifications.ACTION_OPEN_CHAT,
+                FileTransferNotifications.ACTION_OPEN_FILE_TRANSFER,
             )
         ) return
-        val callId = intent.getStringExtra(CallNotifications.EXTRA_CALL_ID) ?: return
-        CallNotifications.cancel(this, callId)
+        val callId = when (action) {
+            ChatNotifications.ACTION_OPEN_CHAT -> intent.getStringExtra(ChatNotifications.EXTRA_SESSION_ID)
+            FileTransferNotifications.ACTION_OPEN_FILE_TRANSFER -> intent.getStringExtra(FileTransferNotifications.EXTRA_SESSION_ID)
+            else -> intent.getStringExtra(CallNotifications.EXTRA_CALL_ID)
+        } ?: return
+        if (action in setOf(CallNotifications.ACTION_ANSWER, CallNotifications.ACTION_DECLINE)) {
+            CallNotifications.cancel(this, callId)
+        }
         when (action) {
             CallNotifications.ACTION_ANSWER -> TelecomCallBridge.answer(callId)
             CallNotifications.ACTION_DECLINE -> TelecomCallBridge.disconnectRejected(callId)
@@ -239,7 +256,12 @@ private fun PermissionGate(
     val state by viewModel.state.collectAsState()
     var showExitConfirmation by remember { mutableStateOf(false) }
     SecureChatWindow(
-        enabled = state.phase in setOf(CallPhase.CONNECTING_CHAT, CallPhase.IN_CHAT) || state.chatVisible,
+        enabled = state.phase in setOf(
+            CallPhase.CONNECTING_CHAT,
+            CallPhase.IN_CHAT,
+            CallPhase.CONNECTING_FILE,
+            CallPhase.IN_FILE,
+        ) || state.chatVisible || state.fileVisible,
     )
     LaunchedEffect(notificationAction, state.phase, state.callId, permissionsGranted) {
         val action = notificationAction ?: return@LaunchedEffect
@@ -269,16 +291,36 @@ private fun PermissionGate(
                 viewModel.hangUpFromTelecom()
                 consumeNotificationAction()
             }
+            ChatNotifications.ACTION_OPEN_CHAT -> if (state.phase == CallPhase.INCOMING_CHAT) {
+                viewModel.acceptIncomingChat(action.callId)
+                consumeNotificationAction()
+            } else if (state.phase in setOf(CallPhase.CONNECTING_CHAT, CallPhase.IN_CHAT)) {
+                viewModel.openChat()
+                consumeNotificationAction()
+            }
+            FileTransferNotifications.ACTION_OPEN_FILE_TRANSFER -> if (state.phase == CallPhase.INCOMING_FILE) {
+                viewModel.acceptIncomingFile(action.callId)
+                consumeNotificationAction()
+            } else if (state.phase in setOf(CallPhase.CONNECTING_FILE, CallPhase.IN_FILE)) {
+                viewModel.openFileTransfer()
+                consumeNotificationAction()
+            }
         }
     }
     BackHandler {
-        when (BackNavigationPolicy.resolve(state.phase, state.chatVisible, state.callVisible)) {
-            BackNavigationAction.CLOSE_CHAT -> viewModel.closeChatLocally()
-            BackNavigationAction.HIDE_CALL -> viewModel.hideCallScreen()
-            BackNavigationAction.CONFIRM_EXIT -> showExitConfirmation = true
+        if (state.fileVisible && (state.phase in setOf(CallPhase.CONNECTING_FILE, CallPhase.IN_FILE) || state.fileTransfer != null)) {
+            viewModel.hideFileTransfer()
+        } else {
+            when (BackNavigationPolicy.resolve(state.phase, state.chatVisible, state.callVisible)) {
+                BackNavigationAction.CLOSE_CHAT -> viewModel.closeChatLocally()
+                BackNavigationAction.HIDE_CALL -> viewModel.hideCallScreen()
+                BackNavigationAction.CONFIRM_EXIT -> showExitConfirmation = true
+            }
         }
     }
-    when (state.phase) {
+    if (state.phase == CallPhase.READY && state.fileVisible && state.fileTransfer != null) {
+        FileTransferScreen(state, viewModel)
+    } else when (state.phase) {
         CallPhase.INCOMING -> if (state.callVisible) {
             IncomingCallScreen(state, viewModel, permissionsGranted) {
                 mediaLauncher.launch(requiredMediaPermissions())
@@ -328,6 +370,21 @@ private fun PermissionGate(
             },
         )
         CallPhase.IN_CHAT -> if (state.chatVisible) ChatScreen(state, viewModel) else HomeScreen(
+            state = state,
+            viewModel = viewModel,
+            permissionsGranted = permissionsGranted,
+            notificationGranted = notificationGranted,
+            fullScreenIntentAllowed = fullScreenIntentAllowed,
+            requestFullScreenIntent = requestFullScreenIntent,
+            requestPermissions = { mediaLauncher.launch(requiredMediaPermissions()) },
+            requestNotifications = {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                }
+            },
+        )
+        CallPhase.CONNECTING_FILE,
+        CallPhase.IN_FILE -> if (state.fileVisible) FileTransferScreen(state, viewModel) else HomeScreen(
             state = state,
             viewModel = viewModel,
             permissionsGranted = permissionsGranted,
@@ -408,6 +465,13 @@ private fun HomeScreen(
     var showAddContact by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
     var requestToCancel by remember { mutableStateOf<SentFriendRequest?>(null) }
+    var fileTarget by remember { mutableStateOf<Contact?>(null) }
+    var callerToSave by remember { mutableStateOf<RecentCaller?>(null) }
+    val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        val target = fileTarget
+        fileTarget = null
+        if (uri != null && target != null) viewModel.startFileTransfer(target, uri)
+    }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -450,6 +514,26 @@ private fun HomeScreen(
             item {
                 StatusCard(state, onReconnect = viewModel::connect)
             }
+            if (state.phase == CallPhase.INCOMING_CHAT) {
+                item {
+                    IncomingDataInvitationCard(
+                        title = "Zaproszenie do szyfrowanego czatu",
+                        peer = state.remoteName ?: state.remoteId.orEmpty(),
+                        onAccept = { state.callId?.let(viewModel::acceptIncomingChat) },
+                        onReject = viewModel::rejectIncomingDataSession,
+                    )
+                }
+            }
+            if (state.phase == CallPhase.INCOMING_FILE) {
+                item {
+                    IncomingDataInvitationCard(
+                        title = "Bezpośredni transfer pliku",
+                        peer = state.remoteName ?: state.remoteId.orEmpty(),
+                        onAccept = { state.callId?.let(viewModel::acceptIncomingFile) },
+                        onReject = viewModel::rejectIncomingDataSession,
+                    )
+                }
+            }
             if (state.phase in setOf(CallPhase.OUTGOING, CallPhase.INCOMING, CallPhase.CONNECTING_CALL, CallPhase.IN_CALL) && !state.callVisible) {
                 item {
                     HiddenCallCard(
@@ -461,6 +545,12 @@ private fun HomeScreen(
             }
             if (state.phase == CallPhase.IN_CHAT && !state.chatVisible) {
                 item { HiddenChatCard(state, viewModel::openChat, viewModel::hangUp) }
+            }
+            if (state.phase in setOf(CallPhase.CONNECTING_FILE, CallPhase.IN_FILE) && !state.fileVisible) {
+                item { HiddenFileTransferCard(state, viewModel::openFileTransfer, viewModel::hangUp) }
+            }
+            if (state.phase == CallPhase.READY && state.fileTransfer?.status == FileTransferStatus.COMPLETE) {
+                item { CompletedFileTransferCard(state, viewModel::openFileTransfer) }
             }
             if (!fullScreenIntentAllowed) {
                 item { FullScreenCallCard(requestFullScreenIntent) }
@@ -490,6 +580,23 @@ private fun HomeScreen(
                     SentFriendRequestCard(request = request, onCancel = { requestToCancel = request })
                 }
             }
+            val unsavedCallers = state.recentCallers.filter { recent -> state.contacts.none { it.id == recent.id } }
+            if (unsavedCallers.isNotEmpty()) {
+                item {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "Ostatni rozmówcy",
+                            modifier = Modifier.padding(top = 8.dp, bottom = 2.dp).weight(1f),
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        TextButton(onClick = viewModel::clearRecentCallers) { Text("Wyczyść") }
+                    }
+                }
+                items(unsavedCallers, key = { it.id }) { caller ->
+                    RecentCallerCard(caller, onSave = { callerToSave = caller })
+                }
+            }
             item {
                 Text(
                     "Kontakty",
@@ -507,10 +614,15 @@ private fun HomeScreen(
                         presence = state.contactPresence[contact.id],
                         callEnabled = state.phase == CallPhase.READY,
                         chatEnabled = state.phase == CallPhase.READY,
+                        fileEnabled = state.phase == CallPhase.READY,
                         onCall = {
                             if (permissionsGranted) viewModel.call(contact) else requestPermissions()
                         },
                         onChat = { viewModel.startChat(contact) },
+                        onFile = {
+                            fileTarget = contact
+                            filePicker.launch(arrayOf("*/*"))
+                        },
                         onDelete = { viewModel.removeContact(contact.id) },
                     )
                 }
@@ -557,6 +669,16 @@ private fun HomeScreen(
             },
             dismissButton = {
                 TextButton(onClick = { requestToCancel = null }) { Text("Anuluj") }
+            },
+        )
+    }
+    callerToSave?.let { caller ->
+        SaveCallerDialog(
+            caller = caller,
+            onDismiss = { callerToSave = null },
+            onSave = { name ->
+                viewModel.saveRecentCaller(caller.id, name)
+                callerToSave = null
             },
         )
     }
@@ -691,6 +813,105 @@ private fun HiddenChatCard(state: AppUiState, onOpen: () -> Unit, onEnd: () -> U
 }
 
 @Composable
+private fun HiddenFileTransferCard(state: AppUiState, onOpen: () -> Unit, onEnd: () -> Unit) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer)) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(Icons.Default.AttachFile, null, tint = MaterialTheme.colorScheme.primary)
+            Column(Modifier.padding(start = 10.dp).weight(1f)) {
+                Text(state.fileTransfer?.fileName ?: "Transfer pliku", fontWeight = FontWeight.SemiBold)
+                Text(state.status, style = MaterialTheme.typography.bodySmall)
+            }
+            TextButton(onClick = onEnd) { Text("Anuluj") }
+            Button(onClick = onOpen) { Text("Otwórz") }
+        }
+    }
+}
+
+@Composable
+private fun CompletedFileTransferCard(state: AppUiState, onOpen: () -> Unit) {
+    val transfer = state.fileTransfer ?: return
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(Icons.Default.CheckCircle, null, tint = MaterialTheme.colorScheme.primary)
+            Column(Modifier.padding(start = 10.dp).weight(1f)) {
+                Text(transfer.fileName, fontWeight = FontWeight.SemiBold)
+                Text("Transfer zakończony • ${formatFileSize(transfer.totalBytes)}", style = MaterialTheme.typography.bodySmall)
+            }
+            Button(onClick = onOpen) { Text(if (transfer.direction == FileTransferDirection.RECEIVE) "Zapisz" else "Szczegóły") }
+        }
+    }
+}
+
+@Composable
+private fun IncomingDataInvitationCard(
+    title: String,
+    peer: String,
+    onAccept: () -> Unit,
+    onReject: () -> Unit,
+) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) {
+        Column(Modifier.fillMaxWidth().padding(16.dp)) {
+            Text(title, fontWeight = FontWeight.Bold)
+            Text(peer, style = MaterialTheme.typography.bodyMedium)
+            Text(
+                "Sesja rozpocznie się dopiero po Twojej zgodzie.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Row(Modifier.align(Alignment.End), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onClick = onReject) { Text("Odrzuć") }
+                Button(onClick = onAccept) { Text("Otwórz") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RecentCallerCard(caller: RecentCaller, onSave: () -> Unit) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(Icons.Default.Call, null, tint = MaterialTheme.colorScheme.primary)
+            Column(Modifier.padding(start = 12.dp).weight(1f)) {
+                Text(caller.id, fontWeight = FontWeight.SemiBold, letterSpacing = 1.sp)
+                Text("Dzwonił ${relativeLastSeen(caller.lastCallAt)}", style = MaterialTheme.typography.bodySmall)
+            }
+            Button(onClick = onSave) { Text("Zapisz") }
+        }
+    }
+}
+
+@Composable
+private fun SaveCallerDialog(caller: RecentCaller, onDismiss: () -> Unit, onSave: (String) -> Unit) {
+    var name by remember(caller.id) { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Zapisz rozmówcę") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(caller.id)
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it.take(80) },
+                    label = { Text("Nazwa kontaktu") },
+                    singleLine = true,
+                )
+            }
+        },
+        confirmButton = { Button(onClick = { onSave(name) }) { Text("Zapisz") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Anuluj") } },
+    )
+}
+
+@Composable
 private fun HiddenCallCard(state: AppUiState, onOpen: () -> Unit, onEnd: () -> Unit) {
     val title = when (state.phase) {
         CallPhase.INCOMING -> "Połączenie przychodzące"
@@ -762,8 +983,10 @@ private fun ContactCard(
     presence: ContactPresence?,
     callEnabled: Boolean,
     chatEnabled: Boolean,
+    fileEnabled: Boolean,
     onCall: () -> Unit,
     onChat: () -> Unit,
+    onFile: () -> Unit,
     onDelete: () -> Unit,
 ) {
     val presenceColor = when {
@@ -807,6 +1030,13 @@ private fun ContactCard(
                 }
             }
             IconButton(onClick = onDelete) { Icon(Icons.Default.DeleteOutline, "Usuń kontakt", tint = MaterialTheme.colorScheme.onSurfaceVariant) }
+            IconButton(onClick = onFile, enabled = fileEnabled) {
+                Icon(
+                    Icons.Default.AttachFile,
+                    "Wyślij plik bezpośrednio",
+                    tint = if (fileEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
+                )
+            }
             IconButton(onClick = onChat, enabled = chatEnabled) {
                 Icon(
                     Icons.AutoMirrored.Filled.Chat,
@@ -852,7 +1082,7 @@ private fun ChatScreen(state: AppUiState, viewModel: CallViewModel) {
                 )
             }
             IconButton(onClick = viewModel::closeChatLocally) {
-                Icon(Icons.Default.Close, "Zamknij czat lokalnie")
+                Icon(Icons.Default.KeyboardArrowDown, "Minimalizuj czat")
             }
         }
         Spacer(Modifier.height(12.dp))
@@ -872,6 +1102,86 @@ private fun ChatScreen(state: AppUiState, viewModel: CallViewModel) {
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
+}
+
+@Composable
+private fun FileTransferScreen(state: AppUiState, viewModel: CallViewModel) {
+    val transfer = state.fileTransfer
+    val saveLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument(transfer?.mimeType ?: "application/octet-stream")
+    ) { destination ->
+        if (destination != null) viewModel.saveReceivedFile(destination)
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .statusBarsPadding()
+            .navigationBarsPadding()
+            .padding(20.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Default.AttachFile, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(30.dp))
+            Column(Modifier.padding(start = 12.dp).weight(1f)) {
+                Text("Bezpośredni transfer", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Text(state.remoteName ?: state.remoteId.orEmpty(), style = MaterialTheme.typography.bodySmall)
+            }
+            IconButton(onClick = viewModel::hideFileTransfer) {
+                Icon(Icons.Default.KeyboardArrowDown, "Minimalizuj transfer")
+            }
+        }
+        Spacer(Modifier.height(36.dp))
+        Surface(shape = CircleShape, color = MaterialTheme.colorScheme.primaryContainer, modifier = Modifier.size(104.dp)) {
+            Box(contentAlignment = Alignment.Center) {
+                Icon(Icons.Default.AttachFile, null, modifier = Modifier.size(48.dp), tint = MaterialTheme.colorScheme.primary)
+            }
+        }
+        Spacer(Modifier.height(24.dp))
+        Text(transfer?.fileName ?: "Oczekiwanie na informacje o pliku…", fontWeight = FontWeight.Bold, fontSize = 20.sp, textAlign = TextAlign.Center)
+        Spacer(Modifier.height(8.dp))
+        Text(
+            transfer?.let { "${formatFileSize(it.transferredBytes)} / ${formatFileSize(it.totalBytes)}" } ?: state.status,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(20.dp))
+        LinearProgressIndicator(
+            progress = { transfer?.progress ?: 0f },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Spacer(Modifier.height(12.dp))
+        Text(state.status, textAlign = TextAlign.Center)
+        transfer?.error?.let {
+            Text(it, color = MaterialTheme.colorScheme.error, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 8.dp))
+        }
+        Spacer(Modifier.weight(1f))
+        if (transfer?.direction == FileTransferDirection.RECEIVE && transfer.status == FileTransferStatus.COMPLETE) {
+            Button(
+                onClick = { saveLauncher.launch(transfer.fileName) },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Icon(Icons.Default.Save, null)
+                Text("Zapisz plik", modifier = Modifier.padding(start = 8.dp))
+            }
+            Spacer(Modifier.height(10.dp))
+        }
+        OutlinedButton(onClick = viewModel::hangUp, modifier = Modifier.fillMaxWidth()) {
+            Text(if (transfer?.status == FileTransferStatus.COMPLETE) "Zakończ" else "Anuluj transfer")
+        }
+        Text(
+            "Plik płynie szyfrowanym kanałem WebRTC bez zapisywania treści na serwerze.",
+            modifier = Modifier.padding(top = 16.dp),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
+    }
+}
+
+private fun formatFileSize(bytes: Long): String = when {
+    bytes >= 1024L * 1024L -> "%.1f MB".format(bytes / (1024f * 1024f))
+    bytes >= 1024L -> "%.1f KB".format(bytes / 1024f)
+    else -> "$bytes B"
 }
 
 @Composable
@@ -1373,8 +1683,9 @@ private fun SettingsDialog(
                             StatusLine("Szyfrowanie transportu WebRTC", true)
                             StatusLine("Podpisywanie tożsamości kontaktów", true)
                             StatusLine("Blokada zrzutów w tajnym czacie", true)
+                            StatusLine("Pliki bez bazy • SHA-256", true)
                             Text(
-                                "Wiadomości nie są zapisywane w bazie i znikają 60 sekund po ich otwarciu. Numer bezpieczeństwa pozwala zweryfikować rozmówcę.",
+                                "Wiadomości nie są zapisywane w bazie i znikają 60 sekund po ich otwarciu. Pliki są przesyłane szyfrowanym kanałem WebRTC i weryfikowane przed zapisem. Numer bezpieczeństwa pozwala zweryfikować rozmówcę.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )

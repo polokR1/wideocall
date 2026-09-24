@@ -51,6 +51,7 @@ class WebRtcClient(
         fun onConnectionStateChanged(state: RtcConnectionState)
         fun onChatReadyChanged(ready: Boolean)
         fun onChatMessage(message: String)
+        fun onBinaryMessage(bytes: ByteArray)
         fun onError(message: String)
     }
 
@@ -255,6 +256,14 @@ class WebRtcClient(
         return channel.send(DataChannel.Buffer(ByteBuffer.wrap(bytes), false))
     }
 
+    fun sendBinaryMessage(bytes: ByteArray): Boolean {
+        val channel = dataChannel ?: return false
+        if (channel.state() != DataChannel.State.OPEN || bytes.isEmpty()) return false
+        return channel.send(DataChannel.Buffer(ByteBuffer.wrap(bytes), true))
+    }
+
+    fun dataChannelBufferedAmount(): Long = dataChannel?.bufferedAmount() ?: Long.MAX_VALUE
+
     fun endCall() {
         bindRemoteRenderer(null)
         bindLocalRenderer(null)
@@ -337,12 +346,13 @@ class WebRtcClient(
             }
 
             override fun onMessage(buffer: DataChannel.Buffer) {
-                if (buffer.binary) return
                 val source = buffer.data.slice()
-                if (source.remaining() !in 1..MAX_CHAT_PAYLOAD_BYTES) return
+                val maxBytes = if (buffer.binary) MAX_BINARY_PAYLOAD_BYTES else MAX_CHAT_PAYLOAD_BYTES
+                if (source.remaining() !in 1..maxBytes) return
                 val bytes = ByteArray(source.remaining())
                 source.get(bytes)
-                listener.onChatMessage(String(bytes, StandardCharsets.UTF_8))
+                if (buffer.binary) listener.onBinaryMessage(bytes)
+                else listener.onChatMessage(String(bytes, StandardCharsets.UTF_8))
             }
         })
         listener.onChatReadyChanged(channel.state() == DataChannel.State.OPEN)
@@ -433,6 +443,7 @@ class WebRtcClient(
         private const val STREAM_ID = "wideocall"
         private const val CHAT_CHANNEL = "ephemeral-chat"
         private const val MAX_CHAT_PAYLOAD_BYTES = 4_096
+        private const val MAX_BINARY_PAYLOAD_BYTES = 64 * 1024
     }
 
     private data class VideoProfile(

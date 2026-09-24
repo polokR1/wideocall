@@ -4,7 +4,7 @@ const SIGNAL_TYPES = new Set([
   "accepted", "hangup", "reject", "busy",
   "contact-request", "contact-accept", "contact-reject", "contact-cancel",
 ]);
-const SESSION_KINDS = new Set(["video", "chat", "contact"]);
+const SESSION_KINDS = new Set(["video", "chat", "file", "contact"]);
 const MAX_SIGNAL_BYTES = 220_000;
 const OFFER_TTL_MS = 45_000;
 const CALL_EVENT_TTL_MS = 2 * 60_000;
@@ -431,8 +431,16 @@ async function sendFcmWake(env, token, signal) {
 }
 
 export function fcmType(signal) {
-  if (signal.type === "offer") return signal.sessionKind === "chat" ? "incoming_chat" : "incoming_call";
-  if (signal.type === "hangup" || signal.type === "reject") return signal.sessionKind === "chat" ? "chat_cancelled" : "call_cancelled";
+  if (signal.type === "offer") {
+    if (signal.sessionKind === "chat") return "incoming_chat";
+    if (signal.sessionKind === "file") return "incoming_file";
+    return "incoming_call";
+  }
+  if (signal.type === "hangup" || signal.type === "reject") {
+    if (signal.sessionKind === "chat") return "chat_cancelled";
+    if (signal.sessionKind === "file") return "file_cancelled";
+    return "call_cancelled";
+  }
   if (signal.type === "contact-request") return "contact_request";
   if (signal.type === "contact-accept") return "contact_accepted";
   if (signal.type === "contact-reject") return "contact_rejected";

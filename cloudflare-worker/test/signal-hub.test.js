@@ -27,3 +27,11 @@ test("cancellation removes the matching queued invitation only", () => {
   const unrelated = { signal: { type: "contact-request", callId: "other-request", from: cancellation.from } };
   assert.deepEqual(filterPendingEvents([matching, unrelated], cancellation), [unrelated]);
 });
+
+test("maps direct file sessions to dedicated wake notifications", () => {
+  const offer = { ...cancellation, type: "offer", sessionKind: "file", sdp: "v=0", sdpType: "offer" };
+  const hangup = { ...offer, type: "hangup" };
+  assert.equal(validateSignal(offer, offer.from), true);
+  assert.equal(fcmType(offer), "incoming_file");
+  assert.equal(fcmType(hangup), "file_cancelled");
+});

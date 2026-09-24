@@ -34,6 +34,7 @@ class WideocallMessagingService : FirebaseMessagingService() {
                 TelecomCallBridge.disconnectRemote(callId)
             }
             "chat_cancelled" -> ChatNotifications.cancel(this, callId)
+            "file_cancelled" -> FileTransferNotifications.cancel(this, callId)
             "contact_request" -> if (!AppVisibility.isForeground) {
                 FriendNotifications.showRequest(this, callerId, callId)
             }
@@ -51,9 +52,8 @@ class WideocallMessagingService : FirebaseMessagingService() {
                 if (request != null) preferences.removeFriendRequest(request.requestId)
                 FriendNotifications.cancel(this, callId)
             }
-            "incoming_chat" -> if (!AppVisibility.isForeground) {
-                ChatNotifications.showInvitation(this, callerId, callId)
-            }
+            "incoming_chat" -> ChatNotifications.showInvitation(this, callerId, callId)
+            "incoming_file" -> FileTransferNotifications.showInvitation(this, callerId, callId)
             "incoming_call" -> if (!AppVisibility.isForeground) {
                 TelecomCallBridge.registerIncoming(callId, callerId)
                 CallNotifications.showIncoming(this, callerId, callId)
