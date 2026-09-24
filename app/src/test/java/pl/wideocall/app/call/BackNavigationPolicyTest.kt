@@ -21,6 +21,14 @@ class BackNavigationPolicyTest {
     }
 
     @Test
+    fun backFromChatDuringCallReturnsToCall() {
+        assertEquals(
+            BackNavigationAction.CLOSE_CHAT,
+            BackNavigationPolicy.resolve(CallPhase.IN_CALL, chatVisible = true, callVisible = true),
+        )
+    }
+
+    @Test
     fun backFromHomeAsksBeforeExit() {
         assertEquals(
             BackNavigationAction.CONFIRM_EXIT,

@@ -69,6 +69,38 @@ class WebRtcClient(
         .setUseHardwareAcousticEchoCanceler(true)
         .setUseHardwareNoiseSuppressor(true)
         .setUseLowLatency(true)
+        .setAudioRecordErrorCallback(object : JavaAudioDeviceModule.AudioRecordErrorCallback {
+            override fun onWebRtcAudioRecordInitError(errorMessage: String) {
+                listener.onError("Mikrofon nie został uruchomiony: $errorMessage")
+            }
+
+            override fun onWebRtcAudioRecordStartError(
+                errorCode: JavaAudioDeviceModule.AudioRecordStartErrorCode,
+                errorMessage: String,
+            ) {
+                listener.onError("Nagrywanie dźwięku nie wystartowało ($errorCode): $errorMessage")
+            }
+
+            override fun onWebRtcAudioRecordError(errorMessage: String) {
+                listener.onError("Mikrofon przestał działać: $errorMessage")
+            }
+        })
+        .setAudioTrackErrorCallback(object : JavaAudioDeviceModule.AudioTrackErrorCallback {
+            override fun onWebRtcAudioTrackInitError(errorMessage: String) {
+                listener.onError("Głośnik nie został uruchomiony: $errorMessage")
+            }
+
+            override fun onWebRtcAudioTrackStartError(
+                errorCode: JavaAudioDeviceModule.AudioTrackStartErrorCode,
+                errorMessage: String,
+            ) {
+                listener.onError("Odtwarzanie dźwięku nie wystartowało ($errorCode): $errorMessage")
+            }
+
+            override fun onWebRtcAudioTrackError(errorMessage: String) {
+                listener.onError("Odtwarzanie dźwięku zostało przerwane: $errorMessage")
+            }
+        })
         .createAudioDeviceModule()
     private val peerConnectionFactory: PeerConnectionFactory
     private var peerConnection: PeerConnection? = null
@@ -120,6 +152,13 @@ class WebRtcClient(
             continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
             bundlePolicy = PeerConnection.BundlePolicy.MAXBUNDLE
             rtcpMuxPolicy = PeerConnection.RtcpMuxPolicy.REQUIRE
+            tcpCandidatePolicy = PeerConnection.TcpCandidatePolicy.ENABLED
+            iceCandidatePoolSize = 2
+            audioJitterBufferMaxPackets = 100
+            audioJitterBufferFastAccelerate = true
+            iceConnectionReceivingTimeout = 8_000
+            iceBackupCandidatePairPingInterval = 2_500
+            enableCpuOveruseDetection = true
         }
         peerConnection = peerConnectionFactory.createPeerConnection(
             configuration,
@@ -455,7 +494,9 @@ class WebRtcClient(
         val maxBitrateBps: Int,
     ) {
         companion object {
-            fun cellular() = VideoProfile(640, 360, 15, 80_000, 350_000, 650_000)
+            // 24 fps looks materially smoother than the previous 15 fps while WebRTC can still
+            // lower quality dynamically on a weak mobile connection.
+            fun cellular() = VideoProfile(640, 360, 24, 80_000, 400_000, 750_000)
             fun wifi() = VideoProfile(1280, 720, 30, 150_000, 800_000, 1_500_000)
         }
     }

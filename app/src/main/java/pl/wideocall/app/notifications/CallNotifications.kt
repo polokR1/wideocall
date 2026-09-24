@@ -26,7 +26,8 @@ object CallNotifications {
     private const val ACTION_SHOW_INCOMING = "pl.wideocall.app.SHOW_INCOMING_CALL"
     const val EXTRA_CALL_ID = "call_id"
     const val EXTRA_CALLER_ID = "caller_id"
-    private const val INCOMING_CHANNEL = "incoming_calls"
+    // New id reapplies the corrected ringtone defaults for existing installations.
+    private const val INCOMING_CHANNEL = "incoming_calls_v2"
     private const val ONGOING_CHANNEL = "ongoing_calls"
 
     fun createChannels(context: Context) {

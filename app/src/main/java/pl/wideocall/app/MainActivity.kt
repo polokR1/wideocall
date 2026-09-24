@@ -35,6 +35,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -66,6 +67,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Videocam
@@ -214,9 +216,8 @@ class MainActivity : ComponentActivity() {
         if (action in setOf(CallNotifications.ACTION_ANSWER, CallNotifications.ACTION_DECLINE)) {
             CallNotifications.cancel(this, callId)
         }
-        when (action) {
-            CallNotifications.ACTION_ANSWER -> TelecomCallBridge.answer(callId)
-            CallNotifications.ACTION_DECLINE -> TelecomCallBridge.disconnectRejected(callId)
+        if (action == CallNotifications.ACTION_DECLINE) {
+            TelecomCallBridge.disconnectRejected(callId)
         }
         notificationAction.value = NotificationAction(action, callId)
     }
@@ -237,15 +238,32 @@ private fun PermissionGate(
     val context = LocalContext.current
     var permissionsGranted by remember { mutableStateOf(hasMediaPermissions(context)) }
     var notificationGranted by remember { mutableStateOf(hasNotificationPermission(context)) }
+    var pendingMediaAction by remember { mutableStateOf<(() -> Unit)?>(null) }
     val mediaLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { results ->
         permissionsGranted = results[Manifest.permission.CAMERA] == true &&
             results[Manifest.permission.RECORD_AUDIO] == true
+        val pending = pendingMediaAction
+        pendingMediaAction = null
+        if (permissionsGranted) pending?.invoke()
     }
     val notificationLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { notificationGranted = hasNotificationPermission(context) }
+    val requestMediaPermissions: () -> Unit = {
+        pendingMediaAction = null
+        mediaLauncher.launch(requiredMediaPermissions())
+    }
+    val requestMediaPermissionsAndThen: (() -> Unit) -> Unit = { action ->
+        if (hasMediaPermissions(context)) {
+            permissionsGranted = true
+            action()
+        } else {
+            pendingMediaAction = action
+            mediaLauncher.launch(requiredMediaPermissions())
+        }
+    }
 
     LaunchedEffect(Unit) {
         if (!hasNotificationPermission(context)) {
@@ -255,6 +273,14 @@ private fun PermissionGate(
 
     val state by viewModel.state.collectAsState()
     var showExitConfirmation by remember { mutableStateOf(false) }
+    KeepScreenAwake(
+        enabled = state.phase in setOf(
+            CallPhase.OUTGOING,
+            CallPhase.INCOMING,
+            CallPhase.CONNECTING_CALL,
+            CallPhase.IN_CALL,
+        ),
+    )
     SecureChatWindow(
         enabled = state.phase in setOf(
             CallPhase.CONNECTING_CHAT,
@@ -267,13 +293,17 @@ private fun PermissionGate(
         val action = notificationAction ?: return@LaunchedEffect
         if (action.callId != state.callId) return@LaunchedEffect
         when (action.action) {
-            CallNotifications.ACTION_ANSWER -> if (state.phase == CallPhase.INCOMING && permissionsGranted) {
-                viewModel.acceptIncomingCallFromTelecom()
+            CallNotifications.ACTION_ANSWER -> if (state.phase == CallPhase.INCOMING) {
                 consumeNotificationAction()
+                requestMediaPermissionsAndThen {
+                    viewModel.acceptIncomingCall()
+                }
             }
-            CallNotifications.ACTION_TELECOM_ANSWER -> if (state.phase == CallPhase.INCOMING && permissionsGranted) {
-                viewModel.acceptIncomingCallFromTelecom()
+            CallNotifications.ACTION_TELECOM_ANSWER -> if (state.phase == CallPhase.INCOMING) {
                 consumeNotificationAction()
+                requestMediaPermissionsAndThen {
+                    viewModel.acceptIncomingCallFromTelecom()
+                }
             }
             CallNotifications.ACTION_DECLINE -> if (state.phase == CallPhase.INCOMING) {
                 viewModel.rejectIncomingCallFromTelecom()
@@ -294,7 +324,7 @@ private fun PermissionGate(
             ChatNotifications.ACTION_OPEN_CHAT -> if (state.phase == CallPhase.INCOMING_CHAT) {
                 viewModel.acceptIncomingChat(action.callId)
                 consumeNotificationAction()
-            } else if (state.phase in setOf(CallPhase.CONNECTING_CHAT, CallPhase.IN_CHAT)) {
+            } else if (state.phase in setOf(CallPhase.CONNECTING_CHAT, CallPhase.IN_CHAT, CallPhase.IN_CALL)) {
                 viewModel.openChat()
                 consumeNotificationAction()
             }
@@ -318,12 +348,14 @@ private fun PermissionGate(
             }
         }
     }
-    if (state.phase == CallPhase.READY && state.fileVisible && state.fileTransfer != null) {
+    if (state.chatVisible && state.phase in setOf(CallPhase.CONNECTING_CHAT, CallPhase.IN_CHAT, CallPhase.IN_CALL)) {
+        ChatScreen(state, viewModel)
+    } else if (state.phase == CallPhase.READY && state.fileVisible && state.fileTransfer != null) {
         FileTransferScreen(state, viewModel)
     } else when (state.phase) {
         CallPhase.INCOMING -> if (state.callVisible) {
             IncomingCallScreen(state, viewModel, permissionsGranted) {
-                mediaLauncher.launch(requiredMediaPermissions())
+                requestMediaPermissionsAndThen(viewModel::acceptIncomingCall)
             }
         } else HomeScreen(
             state = state,
@@ -332,7 +364,8 @@ private fun PermissionGate(
             notificationGranted = notificationGranted,
             fullScreenIntentAllowed = fullScreenIntentAllowed,
             requestFullScreenIntent = requestFullScreenIntent,
-            requestPermissions = { mediaLauncher.launch(requiredMediaPermissions()) },
+            requestPermissions = requestMediaPermissions,
+            requestCallPermissions = requestMediaPermissionsAndThen,
             requestNotifications = {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
@@ -348,7 +381,8 @@ private fun PermissionGate(
             notificationGranted = notificationGranted,
             fullScreenIntentAllowed = fullScreenIntentAllowed,
             requestFullScreenIntent = requestFullScreenIntent,
-            requestPermissions = { mediaLauncher.launch(requiredMediaPermissions()) },
+            requestPermissions = requestMediaPermissions,
+            requestCallPermissions = requestMediaPermissionsAndThen,
             requestNotifications = {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
@@ -362,7 +396,8 @@ private fun PermissionGate(
             notificationGranted = notificationGranted,
             fullScreenIntentAllowed = fullScreenIntentAllowed,
             requestFullScreenIntent = requestFullScreenIntent,
-            requestPermissions = { mediaLauncher.launch(requiredMediaPermissions()) },
+            requestPermissions = requestMediaPermissions,
+            requestCallPermissions = requestMediaPermissionsAndThen,
             requestNotifications = {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
@@ -376,7 +411,8 @@ private fun PermissionGate(
             notificationGranted = notificationGranted,
             fullScreenIntentAllowed = fullScreenIntentAllowed,
             requestFullScreenIntent = requestFullScreenIntent,
-            requestPermissions = { mediaLauncher.launch(requiredMediaPermissions()) },
+            requestPermissions = requestMediaPermissions,
+            requestCallPermissions = requestMediaPermissionsAndThen,
             requestNotifications = {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
@@ -391,7 +427,8 @@ private fun PermissionGate(
             notificationGranted = notificationGranted,
             fullScreenIntentAllowed = fullScreenIntentAllowed,
             requestFullScreenIntent = requestFullScreenIntent,
-            requestPermissions = { mediaLauncher.launch(requiredMediaPermissions()) },
+            requestPermissions = requestMediaPermissions,
+            requestCallPermissions = requestMediaPermissionsAndThen,
             requestNotifications = {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
@@ -405,7 +442,8 @@ private fun PermissionGate(
             notificationGranted = notificationGranted,
             fullScreenIntentAllowed = fullScreenIntentAllowed,
             requestFullScreenIntent = requestFullScreenIntent,
-            requestPermissions = { mediaLauncher.launch(requiredMediaPermissions()) },
+            requestPermissions = requestMediaPermissions,
+            requestCallPermissions = requestMediaPermissionsAndThen,
             requestNotifications = {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
@@ -425,6 +463,21 @@ private fun PermissionGate(
                 TextButton(onClick = { showExitConfirmation = false }) { Text("Zostań") }
             },
         )
+    }
+}
+
+@Composable
+private fun KeepScreenAwake(enabled: Boolean) {
+    val activity = LocalContext.current.findActivity()
+    DisposableEffect(activity, enabled) {
+        if (enabled) {
+            activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+        onDispose {
+            if (enabled) {
+                activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            }
+        }
     }
 }
 
@@ -459,6 +512,7 @@ private fun HomeScreen(
     fullScreenIntentAllowed: Boolean,
     requestFullScreenIntent: () -> Unit,
     requestPermissions: () -> Unit,
+    requestCallPermissions: (() -> Unit) -> Unit,
     requestNotifications: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -616,7 +670,7 @@ private fun HomeScreen(
                         chatEnabled = state.phase == CallPhase.READY,
                         fileEnabled = state.phase == CallPhase.READY,
                         onCall = {
-                            if (permissionsGranted) viewModel.call(contact) else requestPermissions()
+                            requestCallPermissions { viewModel.call(contact) }
                         },
                         onChat = { viewModel.startChat(contact) },
                         onFile = {
@@ -1092,8 +1146,9 @@ private fun ChatScreen(state: AppUiState, viewModel: CallViewModel) {
             state = state,
             onClose = viewModel::closeChatLocally,
             onSend = viewModel::sendChatMessage,
-            sendEnabled = state.phase == CallPhase.IN_CHAT && state.chatReady,
-            modifier = Modifier.fillMaxWidth(),
+            sendEnabled = state.phase in setOf(CallPhase.IN_CHAT, CallPhase.IN_CALL) && state.chatReady,
+            expanded = true,
+            modifier = Modifier.fillMaxWidth().weight(1f),
         )
         Spacer(Modifier.height(12.dp))
         Text(
@@ -1202,6 +1257,7 @@ private fun IncomingCallScreen(
                     .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
                     .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
                     .build()
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) isLooping = true
                 play()
             }
         }.getOrNull()
@@ -1259,19 +1315,9 @@ private fun VideoCallScreen(state: AppUiState, viewModel: CallViewModel) {
             Text(state.status, color = Color.White.copy(alpha = .7f))
             SecurityStatusIcon(state, modifier = Modifier.padding(top = 8.dp), dark = true)
         }
-        if (state.chatVisible) {
-            EphemeralChatPanel(
-                state = state,
-                onClose = viewModel::toggleChat,
-                onSend = viewModel::sendChatMessage,
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(start = 12.dp, end = 12.dp, bottom = 128.dp),
-            )
-        }
         Row(
             modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 44.dp),
-            horizontalArrangement = Arrangement.spacedBy(24.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             RoundIconButton(
@@ -1294,11 +1340,18 @@ private fun VideoCallScreen(state: AppUiState, viewModel: CallViewModel) {
                 onClick = viewModel::switchCamera,
             )
             RoundIconButton(
-                background = if (state.chatVisible) Color(0xFF3C8DFF) else Color.White.copy(alpha = .18f),
+                background = Color.White.copy(alpha = .18f),
                 icon = Icons.AutoMirrored.Filled.Chat,
                 description = "Znikający czat",
                 enabled = state.phase == CallPhase.IN_CALL && state.chatReady,
-                onClick = viewModel::toggleChat,
+                onClick = viewModel::openChat,
+            )
+            RoundIconButton(
+                background = if (state.speakerphoneEnabled) Color(0xFF3C8DFF) else Color.White.copy(alpha = .18f),
+                icon = Icons.AutoMirrored.Filled.VolumeUp,
+                description = "Wyjście audio: ${state.audioRouteName}",
+                enabled = state.phase == CallPhase.IN_CALL && state.canSwitchAudioRoute,
+                onClick = viewModel::toggleSpeaker,
             )
         }
     }
@@ -1336,10 +1389,16 @@ private fun EphemeralChatPanel(
     onSend: (String) -> Unit,
     modifier: Modifier = Modifier,
     sendEnabled: Boolean = true,
+    expanded: Boolean = false,
 ) {
     var text by remember { mutableStateOf("") }
+    val cardModifier = if (expanded) {
+        modifier.fillMaxWidth().fillMaxHeight()
+    } else {
+        modifier.fillMaxWidth().heightIn(max = 360.dp)
+    }
     Card(
-        modifier = modifier.fillMaxWidth().heightIn(max = 360.dp),
+        modifier = cardModifier,
         colors = CardDefaults.cardColors(containerColor = Color(0xEE101820)),
     ) {
         Column(Modifier.padding(12.dp)) {
@@ -1355,8 +1414,13 @@ private fun EphemeralChatPanel(
                     Icon(Icons.Default.Close, "Zamknij czat", tint = Color.White)
                 }
             }
+            val messagesModifier = if (expanded) {
+                Modifier.fillMaxWidth().weight(1f)
+            } else {
+                Modifier.fillMaxWidth().heightIn(min = 80.dp, max = 220.dp)
+            }
             LazyColumn(
-                modifier = Modifier.fillMaxWidth().heightIn(min = 80.dp, max = 220.dp),
+                modifier = messagesModifier,
                 verticalArrangement = Arrangement.spacedBy(6.dp),
                 contentPadding = PaddingValues(vertical = 8.dp),
             ) {
@@ -1609,7 +1673,7 @@ private fun SettingsDialog(
                             QualityOption(
                                 selected = quality == VideoQualityMode.DATA_SAVER,
                                 title = "Oszczędna",
-                                description = "360p i niższy transfer — najlepsza przy słabym zasięgu.",
+                                description = "Do 360p/24 kl./s z adaptacją — płynniejsza w sieci komórkowej.",
                                 onClick = { quality = VideoQualityMode.DATA_SAVER },
                             )
                             QualityOption(
@@ -1630,7 +1694,7 @@ private fun SettingsDialog(
                                 Switch(checked = frontCamera, onCheckedChange = { frontCamera = it })
                             }
                             Text(
-                                "Głośnik, słuchawki i Bluetooth są przełączane przez system Android podczas rozmowy.",
+                                "Głośnik nie wymaga osobnego uprawnienia. Głośnik, słuchawki i Bluetooth są przełączane przez system Android podczas rozmowy.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )

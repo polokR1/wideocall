@@ -1,9 +1,13 @@
 package pl.wideocall.app.call
 
+import android.Manifest
 import android.app.Application
+import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.Uri
+import androidx.core.telecom.CallEndpointCompat
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
@@ -71,6 +75,9 @@ data class AppUiState(
     val remoteName: String? = null,
     val callId: String? = null,
     val microphoneEnabled: Boolean = true,
+    val audioRouteName: String = "Automatycznie",
+    val speakerphoneEnabled: Boolean = false,
+    val canSwitchAudioRoute: Boolean = false,
     val frontCamera: Boolean = true,
     val chatMessages: List<EphemeralChatMessage> = emptyList(),
     val chatReady: Boolean = false,
@@ -103,6 +110,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     private val preferences = AppPreferences(application)
     private val signalingClient = SignalingClient(application, this)
     private val webRtcClient = WebRtcClient(application, this)
+    private val outgoingRingback = OutgoingRingbackPlayer(viewModelScope)
     private val peerIdentityStore = PeerIdentityStore(application)
     private val connectivityManager = application.getSystemService(ConnectivityManager::class.java)
     private val _state = MutableStateFlow(
@@ -154,9 +162,16 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     private val pendingIncomingCandidates = mutableListOf<IceCandidate>()
     private var callTimeoutJob: Job? = null
     private var reconnectJob: Job? = null
+    private var reconnectAttempt = 0
+    private var signalingConnected = false
     private var iceRecoveryJob: Job? = null
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) = onMain {
+            if (!signalingConnected) {
+                reconnectJob?.cancel()
+                reconnectJob = null
+                signalingClient.connect(_state.value.myId)
+            }
             if (hasActiveSession() && activeIsCaller) {
                 scheduleIceRecovery(NETWORK_CHANGE_RECOVERY_DELAY_MS)
             }
@@ -181,6 +196,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     }
 
     fun connect() {
+        reconnectAttempt = 0
         reconnectJob?.cancel()
         reconnectJob = null
         _state.update { it.copy(phase = CallPhase.CONNECTING_SERVER, status = "Łączenie z usługą rozmów…", diagnostic = null) }
@@ -451,6 +467,9 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
             }
             runCatching { OngoingCallService.start(getApplication(), contact.name, callId) }
                 .onFailure { error -> _state.update { it.copy(diagnostic = "Powiadomienie rozmowy: ${error.javaClass.simpleName}.") } }
+            if (!outgoingRingback.start()) {
+                _state.update { it.copy(diagnostic = "Dźwięk dzwonienia: telefon nie udostępnił strumienia rozmowy.") }
+            }
         }
         if (fileOnly) {
             runCatching { DirectFileTransferService.start(getApplication(), contact.name, callId) }
@@ -646,6 +665,12 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         _state.update { it.copy(microphoneEnabled = enabled) }
     }
 
+    fun toggleSpeaker() {
+        if (!TelecomCallBridge.toggleSpeaker(activeCallId)) {
+            _state.update { it.copy(diagnostic = "Dźwięk: brak innego dostępnego wyjścia audio.") }
+        }
+    }
+
     fun switchCamera() {
         webRtcClient.switchCamera()
         _state.update { it.copy(frontCamera = !it.frontCamera) }
@@ -738,6 +763,8 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     fun eglContext() = webRtcClient.eglContext
 
     override fun onConnected() = onMain {
+        signalingConnected = true
+        reconnectAttempt = 0
         reconnectJob?.cancel()
         reconnectJob = null
         TurnCredentialProvider.prefetch(_state.value.myId)
@@ -756,6 +783,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     }
 
     override fun onDisconnected(reason: String) = onMain {
+        signalingConnected = false
         if (hasActiveSession()) {
             _state.update { it.copy(status = "Połączenie trwa • odnawiam sygnalizację…") }
             scheduleReconnect(preserveActiveSession = true)
@@ -782,9 +810,11 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
             "contact-cancel" -> handleFriendCancelled(message)
             "offer" -> handleOffer(message)
             "accepted" -> if (isActiveMessage(message) && _state.value.phase == CallPhase.OUTGOING) {
+                outgoingRingback.stop()
                 _state.update { it.copy(status = "Odebrano • zestawianie połączenia…", diagnostic = null) }
             }
             "answer" -> if (isActiveMessage(message) && message.sdp != null) {
+                outgoingRingback.stop()
                 val chatOnly = activeSessionKind == SignalMessage.SESSION_CHAT
                 val fileOnly = activeSessionKind == SignalMessage.SESSION_FILE
                 _state.update {
@@ -859,6 +889,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
 
     override fun onConnectionStateChanged(state: RtcConnectionState) = onMain {
         if (state == RtcConnectionState.CONNECTED) {
+            outgoingRingback.stop()
             iceConnected = true
             iceRecoveryJob?.cancel()
             iceRecoveryJob = null
@@ -922,7 +953,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         if (!_state.value.chatVisible || !AppVisibility.isForeground) {
             _state.update { it.copy(unreadChatCount = it.unreadChatCount + 1) }
         }
-        if (activeSessionKind == SignalMessage.SESSION_CHAT && (!_state.value.chatVisible || !AppVisibility.isForeground)) {
+        if (activeSessionKind != SignalMessage.SESSION_FILE && (!_state.value.chatVisible || !AppVisibility.isForeground)) {
             ChatNotifications.showMessage(
                 getApplication(),
                 _state.value.remoteName ?: activeRemoteId.orEmpty(),
@@ -985,6 +1016,17 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     override fun onTelecomAnswer(callId: String): Boolean {
         val offer = pendingOffer
         if (offer?.callId != callId || _state.value.phase != CallPhase.INCOMING) return false
+        val application = getApplication<Application>()
+        val hasMediaPermissions = ContextCompat.checkSelfPermission(
+            application,
+            Manifest.permission.CAMERA,
+        ) == PackageManager.PERMISSION_GRANTED && ContextCompat.checkSelfPermission(
+            application,
+            Manifest.permission.RECORD_AUDIO,
+        ) == PackageManager.PERMISSION_GRANTED
+        // Returning false lets Telecom open MainActivity, where Android can display the
+        // runtime permission dialogs and continue the pending answer after approval.
+        if (!hasMediaPermissions) return false
         onMain {
             if (pendingOffer?.callId == callId && _state.value.phase == CallPhase.INCOMING) {
                 acceptIncomingCallFromTelecom()
@@ -1007,6 +1049,21 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         if (activeCallId != callId) return@onMain
         webRtcClient.setMicrophoneEnabled(!muted)
         _state.update { it.copy(microphoneEnabled = !muted) }
+    }
+
+    override fun onTelecomAudioEndpointChanged(
+        callId: String,
+        current: CallEndpointCompat?,
+        available: List<CallEndpointCompat>,
+    ) = onMain {
+        if (activeCallId != callId) return@onMain
+        _state.update {
+            it.copy(
+                audioRouteName = current?.name?.toString().orEmpty().ifBlank { audioEndpointLabel(current?.type) },
+                speakerphoneEnabled = current?.type == CallEndpointCompat.TYPE_SPEAKER,
+                canSwitchAudioRoute = available.map { endpoint -> endpoint.type }.distinct().size > 1,
+            )
+        }
     }
 
     private fun handleOffer(message: SignalMessage) {
@@ -1149,6 +1206,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     }
 
     private fun failCall(message: String, diagnostic: String = "Połączenie: $message") {
+        outgoingRingback.stop()
         val callId = activeCallId
         val remoteId = activeRemoteId
         if (callId != null && remoteId != null) {
@@ -1204,6 +1262,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     }
 
     private fun clearCall(status: String, telecomEnd: TelecomEnd = TelecomEnd.LOCAL) {
+        outgoingRingback.stop()
         val callId = activeCallId
         val completedTransfer = _state.value.fileTransfer?.takeIf { it.status == FileTransferStatus.COMPLETE }
         callTimeoutJob?.cancel()
@@ -1241,6 +1300,9 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 remoteName = null,
                 callId = null,
                 microphoneEnabled = true,
+                audioRouteName = "Automatycznie",
+                speakerphoneEnabled = false,
+                canSwitchAudioRoute = false,
                 frontCamera = true,
                 chatMessages = emptyList(),
                 chatReady = false,
@@ -1326,7 +1388,9 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     private fun scheduleReconnect(preserveActiveSession: Boolean) {
         if (reconnectJob?.isActive == true) return
         reconnectJob = viewModelScope.launch {
-            delay(RECONNECT_DELAY_MS)
+            val delayMs = RECONNECT_DELAYS_MS[reconnectAttempt.coerceAtMost(RECONNECT_DELAYS_MS.lastIndex)]
+            reconnectAttempt = (reconnectAttempt + 1).coerceAtMost(RECONNECT_DELAYS_MS.lastIndex)
+            delay(delayMs)
             reconnectJob = null
             if (preserveActiveSession && hasActiveSession()) {
                 signalingClient.connect(_state.value.myId)
@@ -1441,7 +1505,17 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         viewModelScope.launch(Dispatchers.Main.immediate) { block() }
     }
 
+    private fun audioEndpointLabel(type: Int?): String = when (type) {
+        CallEndpointCompat.TYPE_SPEAKER -> "Głośnik"
+        CallEndpointCompat.TYPE_EARPIECE -> "Telefon"
+        CallEndpointCompat.TYPE_BLUETOOTH -> "Bluetooth"
+        CallEndpointCompat.TYPE_WIRED_HEADSET -> "Słuchawki"
+        CallEndpointCompat.TYPE_STREAMING -> "Urządzenie zewnętrzne"
+        else -> "Automatycznie"
+    }
+
     override fun onCleared() {
+        outgoingRingback.stop()
         callTimeoutJob?.cancel()
         reconnectJob?.cancel()
         iceRecoveryJob?.cancel()
@@ -1468,7 +1542,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
 
     companion object {
         private const val CALL_TIMEOUT_MS = 35_000L
-        private const val RECONNECT_DELAY_MS = 5_000L
+        private val RECONNECT_DELAYS_MS = longArrayOf(1_500L, 3_000L, 6_000L, 10_000L)
         private const val NETWORK_CHANGE_RECOVERY_DELAY_MS = 1_500L
         private const val ICE_DISCONNECTED_GRACE_MS = 4_000L
         private const val ICE_RESTART_RETRY_MS = 8_000L

@@ -34,7 +34,12 @@ class SignalingClient(
         fun onWarning(message: String)
     }
 
-    private val httpClient = OkHttpClient.Builder().pingInterval(20, TimeUnit.SECONDS).build()
+    private val httpClient = OkHttpClient.Builder()
+        .retryOnConnectionFailure(true)
+        .connectTimeout(8, TimeUnit.SECONDS)
+        .writeTimeout(10, TimeUnit.SECONDS)
+        .pingInterval(15, TimeUnit.SECONDS)
+        .build()
     private var socket: WebSocket? = null
     private var userId: String? = null
     private var ready = false

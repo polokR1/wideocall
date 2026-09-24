@@ -8,6 +8,7 @@ import android.util.Log
 import androidx.core.telecom.CallAttributesCompat
 import androidx.core.telecom.CallControlResult
 import androidx.core.telecom.CallControlScope
+import androidx.core.telecom.CallEndpointCompat
 import androidx.core.telecom.CallsManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -26,11 +27,17 @@ object TelecomCallBridge {
         fun onTelecomAnswer(callId: String): Boolean
         fun onTelecomDisconnect(callId: String): Boolean
         fun onTelecomMuteChanged(callId: String, muted: Boolean)
+        fun onTelecomAudioEndpointChanged(
+            callId: String,
+            current: CallEndpointCompat?,
+            available: List<CallEndpointCompat>,
+        )
     }
 
     private sealed interface Action {
         data object Answer : Action
         data object Activate : Action
+        data class ChangeEndpoint(val endpoint: CallEndpointCompat) : Action
         data class Disconnect(val cause: DisconnectCause) : Action
     }
 
@@ -41,6 +48,8 @@ object TelecomCallBridge {
         val actions: Channel<Action>,
         var timeoutJob: Job? = null,
         var appInitiatedDisconnect: Boolean = false,
+        var currentEndpoint: CallEndpointCompat? = null,
+        var availableEndpoints: List<CallEndpointCompat> = emptyList(),
     )
 
     private const val TAG = "TelecomCallBridge"
@@ -91,6 +100,21 @@ object TelecomCallBridge {
     fun answer(callId: String) = send(callId, Action.Answer)
 
     fun activate(callId: String) = send(callId, Action.Activate)
+
+    fun toggleSpeaker(callId: String?): Boolean {
+        if (callId == null) return false
+        val registration = synchronized(lock) { active?.takeIf { it.callId == callId } } ?: return false
+        val current = registration.currentEndpoint
+        val target = if (current?.type == CallEndpointCompat.TYPE_SPEAKER) {
+            registration.availableEndpoints.firstOrNull { it.type == CallEndpointCompat.TYPE_BLUETOOTH }
+                ?: registration.availableEndpoints.firstOrNull { it.type == CallEndpointCompat.TYPE_WIRED_HEADSET }
+                ?: registration.availableEndpoints.firstOrNull { it.type == CallEndpointCompat.TYPE_EARPIECE }
+        } else {
+            registration.availableEndpoints.firstOrNull { it.type == CallEndpointCompat.TYPE_SPEAKER }
+        } ?: return false
+        send(callId, Action.ChangeEndpoint(target))
+        return true
+    }
 
     fun disconnectLocal(callId: String?) = disconnect(callId, DisconnectCause.LOCAL)
 
@@ -163,6 +187,18 @@ object TelecomCallBridge {
                             }
                         }
                     }
+                    launch {
+                        currentCallEndpoint.collect { endpoint ->
+                            registration.currentEndpoint = endpoint
+                            notifyAudioEndpoints(registration)
+                        }
+                    }
+                    launch {
+                        availableEndpoints.collect { endpoints ->
+                            registration.availableEndpoints = endpoints
+                            notifyAudioEndpoints(registration)
+                        }
+                    }
                     launch { processActions(registration) }
                 }
             } catch (error: Exception) {
@@ -187,7 +223,17 @@ object TelecomCallBridge {
         for (action in registration.actions) {
             val result = when (action) {
                 Action.Answer -> answer(CallAttributesCompat.CALL_TYPE_VIDEO_CALL)
-                Action.Activate -> setActive()
+                Action.Activate -> {
+                    val activeResult = setActive()
+                    val speakerResult = if (activeResult !is CallControlResult.Error) {
+                        registration.availableEndpoints
+                            .firstOrNull { it.type == CallEndpointCompat.TYPE_SPEAKER }
+                            ?.takeIf { registration.currentEndpoint?.type != CallEndpointCompat.TYPE_SPEAKER }
+                            ?.let { requestEndpointChange(it) }
+                    } else null
+                    speakerResult ?: activeResult
+                }
+                is Action.ChangeEndpoint -> requestEndpointChange(action.endpoint)
                 is Action.Disconnect -> disconnect(action.cause)
             }
             if (result is CallControlResult.Error) {
@@ -204,7 +250,8 @@ object TelecomCallBridge {
         val registration = synchronized(lock) { active?.takeIf { it.callId == callId } } ?: return
         when (action) {
             Action.Answer,
-            Action.Activate -> registration.timeoutJob?.cancel()
+            Action.Activate,
+            is Action.ChangeEndpoint -> registration.timeoutJob?.cancel()
             is Action.Disconnect -> registration.appInitiatedDisconnect = true
         }
         registration.actions.trySend(action)
@@ -222,5 +269,14 @@ object TelecomCallBridge {
         applicationContext?.let {
             CallNotifications.dispatchAction(it, action, registration.remoteId, registration.callId)
         }
+    }
+
+    private fun notifyAudioEndpoints(registration: Registration) {
+        if (active?.callId != registration.callId) return
+        listener?.onTelecomAudioEndpointChanged(
+            registration.callId,
+            registration.currentEndpoint,
+            registration.availableEndpoints,
+        )
     }
 }
