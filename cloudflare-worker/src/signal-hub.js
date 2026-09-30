@@ -102,6 +102,14 @@ export class SignalHub {
       signal.signature,
     );
     if (!signatureValid) return this.close(socket, 1008, "invalid_signal_signature");
+    // A response from this recipient ends replay of its own incoming offer.
+    if (["answer", "reject", "hangup", "busy"].includes(signal.type)) {
+      const pending = await this.ctx.storage.get("pending_offer");
+      if (pending?.callId === signal.callId && pending.signals[0]?.from === signal.to) {
+        await this.ctx.storage.delete("pending_offer");
+        await this.scheduleNextAlarm();
+      }
+    }
     const recipient = this.env.SIGNAL_HUB.getByName(`user:${signal.to}`);
     const response = await recipient.fetch(new Request("https://signal-hub/deliver", {
       method: "POST",
@@ -117,6 +125,14 @@ export class SignalHub {
     const raw = await readLimitedText(request, MAX_SIGNAL_BYTES);
     const signal = parseJson(raw);
     if (!validateSignal(signal, signal?.from)) return json({ error: "invalid_signal" }, 400);
+    // socket.send() confirms a server-side write, not that Android is awake.
+    // Persist the offer before either transport so a sleeping phone can reconnect.
+    if (signal.type === "offer") {
+      await this.ctx.storage.put("pending_offer", {
+        signals: [signal], callId: signal.callId, expiresAt: Date.now() + OFFER_TTL_MS,
+      });
+      await this.scheduleNextAlarm();
+    }
     const targets = this.ctx.getWebSockets().filter((socket) => socket.deserializeAttachment()?.authenticated === true);
     let deliveredCount = 0;
     for (const socket of targets) {
@@ -127,39 +143,42 @@ export class SignalHub {
         console.log(JSON.stringify({ event: "socket_delivery_failed", type: signal.type, error: error instanceof Error ? error.name : "unknown" }));
       }
     }
-    if (deliveredCount > 0) return json({ delivered: true });
+    // Always wake offers/cancellations even with a seemingly connected WebSocket.
+    if (fcmType(signal)) await this.wakeRecipient(signal, deliveredCount > 0);
     if (signal.type === "offer") {
-      const pending = { signals: [signal], callId: signal.callId, expiresAt: Date.now() + OFFER_TTL_MS };
-      await this.ctx.storage.put("pending_offer", pending);
-      await this.scheduleNextAlarm();
-      const pushToken = await this.ctx.storage.get("push_token");
-      if (typeof pushToken === "string") await sendFcmWake(this.env, pushToken, signal);
+      return json({ delivered: deliveredCount > 0 });
     } else if (signal.type === "ice") {
       const pending = await this.ctx.storage.get("pending_offer");
       if (pending?.callId === signal.callId && pending.expiresAt > Date.now() && pending.signals.length < 64) {
         pending.signals.push(signal);
         await this.ctx.storage.put("pending_offer", pending);
-      } else {
+      } else if (deliveredCount === 0) {
         await this.enqueueEvent(signal, CALL_EVENT_TTL_MS);
       }
     } else if (signal.type === "hangup" || signal.type === "reject") {
       const pending = await this.ctx.storage.get("pending_offer");
-      if (pending?.callId === signal.callId) {
+      if (pending?.callId === signal.callId && pending.signals[0]?.from === signal.from) {
         await this.ctx.storage.delete("pending_offer");
-        const pushToken = await this.ctx.storage.get("push_token");
-        if (typeof pushToken === "string") await sendFcmWake(this.env, pushToken, signal);
-      } else {
+      } else if (deliveredCount === 0) {
         await this.enqueueEvent(signal, CALL_EVENT_TTL_MS);
       }
       await this.scheduleNextAlarm();
     } else if (signal.type.startsWith("contact-")) {
-      await this.enqueueEvent(signal, CONTACT_EVENT_TTL_MS);
-      const pushToken = await this.ctx.storage.get("push_token");
-      if (typeof pushToken === "string") await sendFcmWake(this.env, pushToken, signal);
-    } else {
+      if (deliveredCount === 0) await this.enqueueEvent(signal, CONTACT_EVENT_TTL_MS);
+    } else if (deliveredCount === 0) {
       await this.enqueueEvent(signal, CALL_EVENT_TTL_MS);
     }
-    return json({ delivered: false });
+    return json({ delivered: deliveredCount > 0 });
+  }
+
+  async wakeRecipient(signal, socketDelivered) {
+    const token = await this.ctx.storage.get("push_token");
+    if (typeof token !== "string") {
+      console.warn(JSON.stringify({ event: "wake_missing_token", signalType: signal.type, socketDelivered }));
+      return;
+    }
+    // Do not delay SDP/ICE or its acknowledgement behind Google OAuth/FCM.
+    this.ctx.waitUntil(sendFcmWake(this.env, token, signal, socketDelivered));
   }
 
   async authorize(request) {
@@ -412,8 +431,11 @@ function bytesToBase64(bytes) {
   return btoa(binary);
 }
 
-async function sendFcmWake(env, token, signal) {
-  if (!env.FIREBASE_SERVICE_ACCOUNT_JSON) return;
+export async function sendFcmWake(env, token, signal, socketDelivered = false) {
+  if (!env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+    console.warn(JSON.stringify({ event: "wake_failed", signalType: signal.type, error: "missing_fcm_configuration" }));
+    return false;
+  }
   try {
     const credentials = JSON.parse(env.FIREBASE_SERVICE_ACCOUNT_JSON);
     const accessToken = await googleAccessToken(credentials);
@@ -423,11 +445,17 @@ async function sendFcmWake(env, token, signal) {
     const response = await fetch(`https://fcm.googleapis.com/v1/projects/vidcall-88857/messages:send`, {
       method: "POST",
       headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+      signal: AbortSignal.timeout(5_000),
       body: JSON.stringify({ message: { token, data: { type, callerId: signal.from, recipientId: signal.to, callId: signal.callId, sessionKind: signal.sessionKind }, android: { priority: "HIGH", ttl: contactEvent ? "86400s" : "35s", collapse_key: `${contactEvent ? "contact" : "call"}-${signal.callId}` } } }),
     });
     if (!response.ok) throw new Error(`FCM_${response.status}`);
+    console.log(JSON.stringify({ event: "wake_sent", signalType: signal.type, socketDelivered }));
+    return true;
   } catch (error) {
-    console.log(JSON.stringify({ event: "wake_failed", signalType: signal.type, error: error instanceof Error ? error.message : "unknown" }));
+    const reason = error instanceof Error && /^(FCM|oauth)_\d{3}$/.test(error.message)
+      ? error.message : error instanceof Error ? error.name : "unknown";
+    console.warn(JSON.stringify({ event: "wake_failed", signalType: signal.type, error: reason }));
+    return false;
   }
 }
 
@@ -455,7 +483,7 @@ async function googleAccessToken(credentials) {
   const unsigned = `${base64UrlJson({ alg: "RS256", typ: "JWT" })}.${base64UrlJson(claim)}`;
   const key = await crypto.subtle.importKey("pkcs8", pemToArrayBuffer(credentials.private_key), { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["sign"]);
   const signature = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, new TextEncoder().encode(unsigned));
-  const response = await fetch("https://oauth2.googleapis.com/token", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion: `${unsigned}.${base64UrlBytes(new Uint8Array(signature))}` }) });
+  const response = await fetch("https://oauth2.googleapis.com/token", { method: "POST", signal: AbortSignal.timeout(5_000), headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion: `${unsigned}.${base64UrlBytes(new Uint8Array(signature))}` }) });
   if (!response.ok) throw new Error(`oauth_${response.status}`);
   return (await response.json()).access_token;
 }

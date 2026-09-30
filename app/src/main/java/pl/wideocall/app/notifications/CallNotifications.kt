@@ -10,6 +10,7 @@ import android.media.RingtoneManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.Person
 import pl.wideocall.app.MainActivity
@@ -80,7 +81,12 @@ object CallNotifications {
 
     @Synchronized fun showIncoming(context: Context, callerId: String, callId: String) {
         val handled = context.getSharedPreferences("handled_calls", Context.MODE_PRIVATE)
-        if (handled.getLong(callId, 0L) > System.currentTimeMillis()) return
+        val posted = context.getSharedPreferences("posted_incoming_calls", Context.MODE_PRIVATE)
+        val now = System.currentTimeMillis()
+        if (handled.getLong(callId, 0L) > now || posted.getLong(callId, 0L) > now) {
+            Log.i("CallNotifications", "incoming_notification_duplicate_suppressed")
+            return
+        }
         createChannels(context)
         val person = Person.Builder().setName(callerId).setImportant(true).build()
         val answer = callIntent(context, ACTION_ANSWER, callerId, callId, 10)
@@ -103,6 +109,13 @@ object CallNotifications {
             .build()
         notification.flags = notification.flags or android.app.Notification.FLAG_INSISTENT
         context.getSystemService(NotificationManager::class.java).notify(notificationId(callId), notification)
+        // Reposting ONLY_ALERT_ONCE + INSISTENT can stop an existing system ringtone.
+        // Deduplicate before notify, including FCM/WebSocket races before activeNotifications updates.
+        posted.edit().apply {
+            posted.all.forEach { (key, value) -> if ((value as? Long ?: 0L) <= now) remove(key) }
+            putLong(callId, now + 120_000L)
+        }.apply()
+        Log.i("CallNotifications", "incoming_notification_posted")
     }
 
     @Synchronized fun cancel(context: Context, callId: String?) {
@@ -114,6 +127,8 @@ object CallNotifications {
             putLong(callId, now + 120_000L)
         }.apply()
         context.getSystemService(NotificationManager::class.java).cancel(notificationId(callId))
+        context.getSharedPreferences("posted_incoming_calls", Context.MODE_PRIVATE).edit().remove(callId).apply()
+        Log.i("CallNotifications", "incoming_notification_cancelled")
     }
 
     fun dispatchAction(context: Context, action: String, callerId: String, callId: String) {

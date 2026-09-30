@@ -5,6 +5,7 @@ import com.google.firebase.messaging.RemoteMessage
 import pl.wideocall.app.data.AppPreferences
 import pl.wideocall.app.BuildConfig
 import pl.wideocall.app.call.TelecomCallBridge
+import android.util.Log
 
 class WideocallMessagingService : FirebaseMessagingService() {
     override fun onNewToken(token: String) {
@@ -14,8 +15,10 @@ class WideocallMessagingService : FirebaseMessagingService() {
 
     override fun onMessageReceived(message: RemoteMessage) {
         if (!BuildConfig.FCM_ENABLED) return
+        Log.i("WideocallPush", "wake_received foreground=${AppVisibility.isForeground} priority=${message.priority} originalPriority=${message.originalPriority}")
         runCatching { handleMessage(message.data) }
             .onFailure { error ->
+                Log.w("WideocallPush", "wake_handler_failed ${error.javaClass.simpleName}")
                 AppPreferences(this).saveBackgroundIssue(
                     "Powiadomienia w tle: ${error.javaClass.simpleName}. Otwórz aplikację i spróbuj ponownie.",
                 )
