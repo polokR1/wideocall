@@ -8,8 +8,6 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.media.AudioAttributes
-import android.media.RingtoneManager
 import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
@@ -138,7 +136,7 @@ import pl.wideocall.app.signaling.ContactPresence
 import pl.wideocall.app.ui.theme.WideocallTheme
 import kotlinx.coroutines.flow.MutableStateFlow
 
-private data class NotificationAction(val action: String, val callId: String)
+private data class NotificationAction(val action: String, val callId: String, val peerId: String? = null)
 
 class MainActivity : ComponentActivity() {
     private val viewModel: CallViewModel by viewModels()
@@ -182,6 +180,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         refreshFullScreenIntentPermission()
+        viewModel.onAppVisible()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -220,7 +219,7 @@ class MainActivity : ComponentActivity() {
         if (action == CallNotifications.ACTION_DECLINE) {
             TelecomCallBridge.disconnectRejected(callId)
         }
-        notificationAction.value = NotificationAction(action, callId)
+        notificationAction.value = NotificationAction(action, callId, intent.getStringExtra(ChatNotifications.EXTRA_PEER_ID))
     }
 
     private fun refreshFullScreenIntentPermission() {
@@ -292,6 +291,11 @@ private fun PermissionGate(
     )
     LaunchedEffect(notificationAction, state.phase, state.callId, permissionsGranted) {
         val action = notificationAction ?: return@LaunchedEffect
+        if (action.action == ChatNotifications.ACTION_OPEN_CHAT && action.peerId != null) {
+            viewModel.openLocalChat(action.peerId)
+            consumeNotificationAction()
+            return@LaunchedEffect
+        }
         if (action.callId != state.callId) return@LaunchedEffect
         when (action.action) {
             CallNotifications.ACTION_ANSWER -> if (state.phase == CallPhase.INCOMING) {
@@ -349,7 +353,7 @@ private fun PermissionGate(
             }
         }
     }
-    if (state.chatVisible && state.phase in setOf(CallPhase.CONNECTING_CHAT, CallPhase.IN_CHAT, CallPhase.IN_CALL)) {
+    if (state.chatVisible && state.chatPeerId != null && state.phase in setOf(CallPhase.READY, CallPhase.SERVER_ERROR, CallPhase.CONNECTING_SERVER, CallPhase.CONNECTING_CHAT, CallPhase.IN_CHAT, CallPhase.IN_CALL)) {
         ChatScreen(state, viewModel)
     } else if (state.phase == CallPhase.READY && state.fileVisible && state.fileTransfer != null) {
         FileTransferScreen(state, viewModel)
@@ -674,7 +678,7 @@ private fun HomeScreen(
                         contact = contact,
                         presence = state.contactPresence[contact.id],
                         callEnabled = state.phase == CallPhase.READY,
-                        chatEnabled = state.phase == CallPhase.READY,
+                        chatEnabled = state.phase in setOf(CallPhase.READY, CallPhase.SERVER_ERROR, CallPhase.CONNECTING_SERVER),
                         fileEnabled = state.phase == CallPhase.READY,
                         onCall = {
                             requestCallPermissions { viewModel.call(contact) }
@@ -1132,12 +1136,12 @@ private fun ChatScreen(state: AppUiState, viewModel: CallViewModel) {
             )
             Column(Modifier.padding(start = 12.dp).weight(1f)) {
                 Text(
-                    state.remoteName ?: state.remoteId.orEmpty(),
+                    state.chatPeerName ?: state.chatPeerId.orEmpty(),
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold,
                 )
                 Text(
-                    state.status,
+                    if (state.chatReady) "Połączenie szyfrowane • ${state.status}" else "Skrzynka lokalna • ${state.status}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -1154,16 +1158,24 @@ private fun ChatScreen(state: AppUiState, viewModel: CallViewModel) {
             onClose = viewModel::closeChatLocally,
             onSend = viewModel::sendChatMessage,
             onDraftChanged = viewModel::setChatDraft,
-            sendEnabled = state.phase in setOf(CallPhase.IN_CHAT, CallPhase.IN_CALL) && state.chatReady,
+            sendEnabled = state.chatPeerId != null && !state.chatSaving,
             expanded = true,
             modifier = Modifier.fillMaxWidth().weight(1f),
         )
         Spacer(Modifier.height(12.dp))
         Text(
-            "Treść nie jest zapisywana w bazie. Minuta jest liczona osobno na każdym telefonie od chwili otwarcia wiadomości.",
+            "Treść jest zaszyfrowana lokalnie, nie na serwerze. Minuta od otwarcia na tym telefonie; wysłane — po potwierdzeniu odbioru. Niewysłane czekają na bezpośrednie połączenie.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        if (!state.chatReady && state.phase == CallPhase.READY) {
+            TextButton(onClick = { state.chatPeerId?.let { viewModel.startChat(Contact(it, state.chatPeerName ?: it)) } }) {
+                Text("Połącz czat / ponów dostarczenie")
+            }
+        }
+        if (state.chatMessages.any { it.pending }) {
+            TextButton(onClick = viewModel::discardPendingChat) { Text("Usuń niewysłane wiadomości") }
+        }
     }
 }
 
@@ -1254,23 +1266,7 @@ private fun IncomingCallScreen(
     permissionsGranted: Boolean,
     requestPermissions: () -> Unit,
 ) {
-    val context = LocalContext.current
-    DisposableEffect(Unit) {
-        val ringtone = runCatching {
-            RingtoneManager.getRingtone(
-                context,
-                RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE),
-            )?.apply {
-                audioAttributes = AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                    .build()
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) isLooping = true
-                play()
-            }
-        }.getOrNull()
-        onDispose { ringtone?.stop() }
-    }
+    // The call notification owns ringing. Rendering this screen must not start a second player.
     Column(
         modifier = Modifier.fillMaxSize().background(Color(0xFF07130F)).statusBarsPadding().padding(28.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -1468,12 +1464,11 @@ internal fun EphemeralChatPanel(
                             color = if (message.mine) Color(0xFF285FA8) else Color(0xFF26323D),
                             shape = RoundedCornerShape(14.dp),
                         ) {
-                            Text(
-                                message.text,
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                                color = Color.White,
-                                style = MaterialTheme.typography.bodyMedium,
-                            )
+                            Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                                Text(message.text, color = Color.White, style = MaterialTheme.typography.bodyMedium)
+                                if (message.mine) Text(if (message.pending) "Czeka na dostarczenie" else "Odbiór potwierdzony",
+                                    color = Color(0xFFCEDFF6), style = MaterialTheme.typography.labelSmall)
+                            }
                         }
                     }
                 }

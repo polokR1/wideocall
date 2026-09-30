@@ -13,6 +13,7 @@ import pl.wideocall.app.R
 object ChatNotifications {
     const val ACTION_OPEN_CHAT = "pl.wideocall.app.action.OPEN_CHAT"
     const val EXTRA_SESSION_ID = "chat_session_id"
+    const val EXTRA_PEER_ID = "chat_peer_id"
     private const val CHANNEL_ID = "encrypted_chat_secret_v2"
     private const val ID_OFFSET = 31_337
 
@@ -39,14 +40,14 @@ object ChatNotifications {
         )
     }
 
-    fun showMessage(context: Context, callerId: String, sessionId: String?) {
-        if (sessionId == null) return
+    fun showMessage(context: Context, callerId: String, peerId: String) {
         show(
             context = context,
             title = "Nowa znikająca wiadomość",
             text = "$callerId • treść ukryta",
-            sessionId = sessionId,
-            timeoutMs = 60_000L,
+            sessionId = "local:$peerId",
+            timeoutMs = null,
+            peerId = peerId,
         )
     }
 
@@ -74,11 +75,13 @@ object ChatNotifications {
         sessionId: String,
         timeoutMs: Long?,
         ongoing: Boolean = false,
+        peerId: String? = null,
     ) {
         createChannel(context)
         val intent = Intent(context, MainActivity::class.java).apply {
             action = ACTION_OPEN_CHAT
             putExtra(EXTRA_SESSION_ID, sessionId)
+            putExtra(EXTRA_PEER_ID, peerId)
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
         val open = PendingIntent.getActivity(

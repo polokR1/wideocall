@@ -44,6 +44,7 @@ import pl.wideocall.app.security.IdentityKeyManager
 import pl.wideocall.app.security.PeerIdentityStatus
 import pl.wideocall.app.security.PeerIdentityStore
 import java.util.UUID
+import pl.wideocall.app.WideocallApplication
 
 enum class CallPhase {
     CONNECTING_SERVER,
@@ -83,6 +84,9 @@ data class AppUiState(
     val chatReady: Boolean = false,
     val chatDraft: String = "",
     val chatSendError: String? = null,
+    val chatPeerId: String? = null,
+    val chatPeerName: String? = null,
+    val chatSaving: Boolean = false,
     val signalingConnected: Boolean = false,
     val chatVisible: Boolean = false,
     val safetyNumber: String? = null,
@@ -103,6 +107,7 @@ data class EphemeralChatMessage(
     val mine: Boolean,
     val createdAt: Long,
     val openedAt: Long? = null,
+    val pending: Boolean = false,
 )
 
 class CallViewModel(application: Application) : AndroidViewModel(application),
@@ -115,6 +120,10 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     private val webRtcClient = WebRtcClient(application, this)
     private val outgoingRingback = OutgoingRingbackPlayer(viewModelScope)
     private val peerIdentityStore = PeerIdentityStore(application)
+    private val localChatStore = (application as WideocallApplication).localChatStore
+    private var chatFlushJob: Job? = null
+    private var persistentChatReady = false
+    private val messageExpiryJobs = mutableMapOf<String, Job>()
     private val connectivityManager = application.getSystemService(ConnectivityManager::class.java)
     private val _state = MutableStateFlow(
         AppUiState(
@@ -224,7 +233,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     }
 
     fun onAppVisible() {
-        if (_state.value.chatVisible && _state.value.chatMessages.any { it.openedAt == null }) openChat()
+        if (_state.value.chatVisible) openChat()
     }
 
     fun saveSettings(
@@ -403,7 +412,17 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     }
 
     fun startChat(contact: Contact) {
-        startOutgoingSession(contact, SignalMessage.SESSION_CHAT)
+        if (activeCallId != null && (activeRemoteId != contact.id || activeSessionKind == SignalMessage.SESSION_FILE)) {
+            _state.update { it.copy(diagnostic = "Zakończ bieżącą sesję przed otwarciem innego czatu.") }
+            return
+        }
+        _state.update { it.copy(chatPeerId = contact.id, chatPeerName = contact.name, chatVisible = true, chatSendError = null,
+            chatMessages = if (it.chatPeerId == contact.id) it.chatMessages else emptyList(),
+            chatDraft = if (it.chatPeerId == contact.id) it.chatDraft else "") }
+        refreshLocalChat(contact.id, markOpened = true)
+        if (activeCallId == null && signalingConnected && _state.value.phase == CallPhase.READY) {
+            startOutgoingSession(contact, SignalMessage.SESSION_CHAT)
+        }
     }
 
     fun startFileTransfer(contact: Contact, uri: Uri) {
@@ -456,7 +475,10 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 callId = callId,
                 microphoneEnabled = true,
                 frontCamera = preferences.startWithFrontCamera,
-                chatMessages = emptyList(),
+                chatMessages = if (it.chatPeerId == contact.id) it.chatMessages else emptyList(),
+                chatDraft = if (it.chatPeerId == contact.id) it.chatDraft else "",
+                chatPeerId = contact.id,
+                chatPeerName = contact.name,
                 chatReady = false,
                 chatVisible = chatOnly,
                 fileVisible = fileOnly,
@@ -468,6 +490,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
             )
         }
         signalingClient.setBusy(true)
+        if (!fileOnly) refreshLocalChat(contact.id, markOpened = chatOnly)
         if (!dataOnly) {
             if (!TelecomCallBridge.registerOutgoing(callId, contact.id)) {
                 _state.update { it.copy(diagnostic = "Android Telecom: system nie zarejestrował połączenia wychodzącego.") }
@@ -579,6 +602,12 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
             )
         }
         startSetupTimeout(callId, remoteId)
+        if (!fileOnly) {
+            _state.update { it.copy(chatPeerId = remoteId, chatPeerName = it.remoteName ?: remoteId,
+                chatMessages = if (it.chatPeerId == remoteId) it.chatMessages else emptyList(),
+                chatDraft = if (it.chatPeerId == remoteId) it.chatDraft else "") }
+            refreshLocalChat(remoteId, markOpened = chatOnly)
+        }
         CallNotifications.cancel(getApplication(), offer.callId)
         ChatNotifications.cancel(getApplication(), offer.callId)
         FileTransferNotifications.cancel(getApplication(), offer.callId)
@@ -739,20 +768,27 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     }
 
     fun openChat() {
-        val now = System.currentTimeMillis()
-        val newlyOpened = _state.value.chatMessages.filter { it.openedAt == null }.map { it.id }
-        _state.update { current ->
-            current.copy(
-                chatVisible = true,
-                unreadChatCount = 0,
-                chatMessages = current.chatMessages.map { message ->
-                    if (message.openedAt == null) message.copy(openedAt = now) else message
-                },
-            )
-        }
-        newlyOpened.forEach { scheduleMessageExpiry(it, now) }
+        val peer = activeRemoteId ?: _state.value.chatPeerId ?: return
+        _state.update { it.copy(chatVisible = true, chatPeerId = peer,
+            chatPeerName = _state.value.contacts.firstOrNull { contact -> contact.id == peer }?.name ?: peer) }
+        refreshLocalChat(peer, markOpened = AppVisibility.isForeground)
         ChatNotifications.cancel(getApplication(), activeCallId)
+        ChatNotifications.cancel(getApplication(), "local:$peer")
         FileTransferNotifications.cancel(getApplication(), activeCallId)
+    }
+
+    fun openLocalChat(peer: String) {
+        if (!peer.matches(Regex("[A-Z0-9]{4}-[A-Z0-9]{4}"))) return
+        if (activeRemoteId != null && activeRemoteId != peer) {
+            _state.update { it.copy(diagnostic = "Zakończ obecną sesję przed otwarciem innego czatu.") }
+            return
+        }
+        _state.update { it.copy(chatVisible = true, chatPeerId = peer,
+            chatPeerName = it.contacts.firstOrNull { contact -> contact.id == peer }?.name ?: peer,
+            chatMessages = if (it.chatPeerId == peer) it.chatMessages else emptyList(),
+            chatDraft = if (it.chatPeerId == peer) it.chatDraft else "") }
+        refreshLocalChat(peer, markOpened = true)
+        ChatNotifications.cancel(getApplication(), "local:$peer")
     }
 
     fun setChatDraft(raw: String) {
@@ -761,18 +797,39 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
 
     fun sendChatMessage(raw: String): Boolean {
         val current = _state.value
-        val result = ChatSendPolicy.send(raw, current.phase, current.chatReady) { text ->
-            webRtcClient.sendChatMessage(JSONObject().put("text", text).toString())
+        val peer = current.chatPeerId ?: activeRemoteId ?: return false
+        val text = EphemeralChatPolicy.sanitize(raw)
+        if (text.isBlank() || current.chatSaving) return false
+        _state.update { it.copy(chatSaving = true, chatSendError = null) }
+        viewModelScope.launch {
+            try {
+                localChatStore.add(peer, EphemeralChatMessage(UUID.randomUUID().toString(), text, true,
+                    System.currentTimeMillis(), pending = true))
+                _state.update { it.copy(chatDraft = if (it.chatPeerId == peer && it.chatDraft == raw) "" else it.chatDraft, chatSaving = false) }
+                refreshLocalChat(peer)
+                if (activeCallId == null && signalingConnected && _state.value.phase == CallPhase.READY) {
+                    startOutgoingSession(Contact(peer, current.chatPeerName ?: peer), SignalMessage.SESSION_CHAT)
+                }
+            } catch (error: Exception) {
+                _state.update { it.copy(chatSaving = false, chatSendError = "Nie zapisano wiadomości: ${error.javaClass.simpleName}. Tekst zachowano.") }
+            }
         }
-        val text = result.getOrElse { error ->
-            _state.update { it.copy(chatDraft = raw.take(1_000), chatSendError = error.message ?: "Błąd wysyłania wiadomości. Tekst zachowano.") }
-            return false
-        }
-        val now = System.currentTimeMillis()
-        val message = EphemeralChatMessage(UUID.randomUUID().toString(), text, true, now, now)
-        addChatMessage(message)
-        _state.update { it.copy(chatDraft = "", chatSendError = null) }
         return true
+    }
+
+    private fun refreshLocalChat(peer: String, markOpened: Boolean = false) {
+        viewModelScope.launch {
+            try {
+                if (markOpened && _state.value.chatPeerId == peer && _state.value.chatVisible && AppVisibility.isForeground)
+                    localChatStore.opened(peer, System.currentTimeMillis())
+                val messages = localChatStore.read(peer)
+                if (_state.value.chatPeerId == peer) _state.update { it.copy(chatMessages = messages,
+                    unreadChatCount = messages.count { message -> !message.mine && message.openedAt == null }) }
+                messages.forEach { message -> message.openedAt?.let { if (!message.pending) scheduleMessageExpiry(peer, message.id, it) } }
+            } catch (error: Exception) {
+                _state.update { it.copy(chatSendError = "Nie można otworzyć lokalnej skrzynki: ${error.javaClass.simpleName}. Nie usunięto danych.") }
+            }
+        }
     }
 
     fun bindLocalRenderer(renderer: SurfaceViewRenderer?) = webRtcClient.bindLocalRenderer(renderer)
@@ -912,34 +969,101 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     override fun onChatReadyChanged(ready: Boolean) = onMain {
         if (!hasActiveSession()) return@onMain
         _state.update { it.copy(chatReady = ready) }
-        if (ready && activeSessionKind == SignalMessage.SESSION_FILE) fileTransferManager.onChannelReady()
+        if (activeSessionKind == SignalMessage.SESSION_FILE) {
+            if (ready) fileTransferManager.onChannelReady()
+        } else if (ready) startChatFlush() else {
+            persistentChatReady = false
+            chatFlushJob?.cancel()
+            chatFlushJob = null
+        }
     }
 
     override fun onChatMessage(message: String) = onMain {
         if (!hasActiveSession()) return@onMain
         if (activeSessionKind == SignalMessage.SESSION_FILE && fileTransferManager.onText(message)) return@onMain
-        val parsed = runCatching {
-            val json = JSONObject(message)
-            val text = EphemeralChatPolicy.sanitize(json.getString("text"))
-            val now = System.currentTimeMillis()
-            if (text.isBlank()) null else EphemeralChatMessage(
-                id = UUID.randomUUID().toString(),
-                text = text,
-                mine = false,
-                createdAt = now,
-                openedAt = now.takeIf { _state.value.chatVisible && AppVisibility.isForeground },
-            )
-        }.getOrNull() ?: return@onMain
-        addChatMessage(parsed)
-        if (!_state.value.chatVisible || !AppVisibility.isForeground) {
-            _state.update { it.copy(unreadChatCount = it.unreadChatCount + 1) }
+        if (activeSessionKind == SignalMessage.SESSION_FILE || message.length > 8_192) return@onMain
+        val peer = activeRemoteId ?: return@onMain
+        val session = activeCallId ?: return@onMain
+        val json = runCatching { JSONObject(message) }.getOrNull() ?: return@onMain
+        when (json.optString("type")) {
+            "chat-hello", "chat-hello-ack" -> {
+                if (json.optInt("version") != 2) return@onMain
+                persistentChatReady = true
+                if (json.optString("type") == "chat-hello") webRtcClient.sendChatMessage(
+                    JSONObject().put("type", "chat-hello-ack").put("version", 2).toString())
+                _state.update { it.copy(chatSendError = null) }
+                startChatFlush()
+            }
+            "chat-ack" -> {
+                val id = json.optString("id")
+                if (!validChatMessageId(id)) return@onMain
+                viewModelScope.launch {
+                    try {
+                        localChatStore.acknowledged(peer, id, System.currentTimeMillis().takeIf {
+                            _state.value.chatVisible && _state.value.chatPeerId == peer && AppVisibility.isForeground
+                        })
+                        refreshLocalChat(peer)
+                    } catch (error: Exception) { chatStorageError(error) }
+                }
+            }
+            "chat-message", "" -> {
+                val modern = json.optString("type") == "chat-message"
+                val id = if (modern) json.optString("id") else UUID.randomUUID().toString()
+                val text = EphemeralChatPolicy.sanitize(json.optString("text"))
+                if (!validChatMessageId(id) || text.isBlank()) return@onMain
+                viewModelScope.launch {
+                    try {
+                        val now = System.currentTimeMillis()
+                        val visible = _state.value.chatVisible && _state.value.chatPeerId == peer && AppVisibility.isForeground
+                        val added = localChatStore.add(peer, EphemeralChatMessage(id, text, false, now, now.takeIf { visible }))
+                        // Acknowledge only after the atomic encrypted write succeeds, including duplicate deliveries.
+                        if (modern && activeCallId == session && activeRemoteId == peer) webRtcClient.sendChatMessage(
+                            JSONObject().put("type", "chat-ack").put("id", id).toString())
+                        refreshLocalChat(peer)
+                        if (added && !visible) runCatching {
+                            ChatNotifications.showMessage(getApplication(), preferences.contacts().firstOrNull { it.id == peer }?.name ?: peer, peer)
+                        }.onFailure { chatStorageError(it) }
+                    } catch (error: Exception) { chatStorageError(error) }
+                }
+            }
         }
-        if (activeSessionKind != SignalMessage.SESSION_FILE && (!_state.value.chatVisible || !AppVisibility.isForeground)) {
-            ChatNotifications.showMessage(
-                getApplication(),
-                _state.value.remoteName ?: activeRemoteId.orEmpty(),
-                activeCallId,
-            )
+    }
+
+    private fun validChatMessageId(id: String): Boolean = runCatching { UUID.fromString(id).toString() == id }.getOrDefault(false)
+
+    private fun chatStorageError(error: Throwable) {
+        _state.update { it.copy(chatSendError = "Błąd lokalnego czatu: ${error.javaClass.simpleName}. Wiadomości nie potwierdzono; nadawca może ponowić wysyłkę.") }
+    }
+
+    private fun startChatFlush() {
+        if (chatFlushJob?.isActive == true || !_state.value.chatReady) return
+        val peer = activeRemoteId ?: return
+        val session = activeCallId ?: return
+        chatFlushJob = viewModelScope.launch {
+            var handshakeAttempts = 0
+            while (activeCallId == session && activeRemoteId == peer && _state.value.chatReady) {
+                try {
+                    if (!persistentChatReady) {
+                        webRtcClient.sendChatMessage(JSONObject().put("type", "chat-hello").put("version", 2).toString())
+                        if (++handshakeAttempts >= 3) _state.update { it.copy(chatSendError = "Brak potwierdzenia obsługi kolejki. Zaktualizuj aplikację na obu telefonach. Wiadomości nadal czekają lokalnie.") }
+                    } else {
+                        val pending = localChatStore.read(peer).filter { it.pending }.take(100)
+                        for (entry in pending) {
+                            if (activeCallId != session || !_state.value.chatReady) break
+                            if (!webRtcClient.sendChatMessage(JSONObject().put("type", "chat-message").put("id", entry.id).put("text", entry.text).toString())) break
+                        }
+                    }
+                } catch (error: Exception) { chatStorageError(error) }
+                delay(3_000)
+            }
+        }
+    }
+
+    fun discardPendingChat() {
+        val peer = _state.value.chatPeerId ?: return
+        viewModelScope.launch {
+            try { localChatStore.discardPending(peer); refreshLocalChat(peer) }
+            catch (error: Exception) { chatStorageError(error) }
         }
     }
 
@@ -1098,7 +1222,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 remoteId = from,
                 remoteName = contact?.name ?: from,
                 callId = message.callId,
-                chatMessages = emptyList(),
+                chatMessages = if (it.chatPeerId == from) it.chatMessages else emptyList(),
                 chatReady = false,
                 chatVisible = false,
                 fileVisible = false,
@@ -1196,6 +1320,9 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     }
 
     private fun failCall(message: String, diagnostic: String = "Połączenie: $message") {
+        chatFlushJob?.cancel()
+        chatFlushJob = null
+        persistentChatReady = false
         outgoingRingback.stop()
         val callId = activeCallId
         val remoteId = activeRemoteId
@@ -1237,13 +1364,8 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 remoteId = null,
                 remoteName = null,
                 callId = null,
-                chatMessages = emptyList(),
                 chatReady = false,
-                chatDraft = "",
-                chatSendError = null,
-                chatVisible = false,
                 callVisible = true,
-                unreadChatCount = 0,
                 safetyNumber = null,
                 peerIdentityVerified = false,
                 diagnostic = diagnostic,
@@ -1255,6 +1377,9 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     }
 
     private fun clearCall(status: String, telecomEnd: TelecomEnd = TelecomEnd.LOCAL) {
+        chatFlushJob?.cancel()
+        chatFlushJob = null
+        persistentChatReady = false
         outgoingRingback.stop()
         val callId = activeCallId
         val completedTransfer = _state.value.fileTransfer?.takeIf { it.status == FileTransferStatus.COMPLETE }
@@ -1297,13 +1422,8 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 speakerphoneEnabled = false,
                 canSwitchAudioRoute = false,
                 frontCamera = true,
-                chatMessages = emptyList(),
                 chatReady = false,
-                chatDraft = "",
-                chatSendError = null,
-                chatVisible = false,
                 callVisible = true,
-                unreadChatCount = 0,
                 safetyNumber = null,
                 peerIdentityVerified = false,
                 fileTransfer = completedTransfer,
@@ -1313,18 +1433,15 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         if (!signalingConnected) scheduleReconnect()
     }
 
-    private fun addChatMessage(message: EphemeralChatMessage) {
-        _state.update { it.copy(chatMessages = (it.chatMessages + message).takeLast(MAX_CHAT_MESSAGES)) }
-        message.openedAt?.let { scheduleMessageExpiry(message.id, it) }
-    }
-
-    private fun scheduleMessageExpiry(messageId: String, openedAt: Long) {
-        viewModelScope.launch {
+    private fun scheduleMessageExpiry(peer: String, messageId: String, openedAt: Long) {
+        val key = "$peer/$messageId"
+        if (messageExpiryJobs[key]?.isActive == true) return
+        messageExpiryJobs[key] = viewModelScope.launch {
             val remaining = (openedAt + EphemeralChatPolicy.LIFETIME_MS - System.currentTimeMillis()).coerceAtLeast(0L)
             delay(remaining)
-            _state.update { current ->
-                current.copy(chatMessages = current.chatMessages.filterNot { it.id == messageId })
-            }
+            try { localChatStore.prune(); refreshLocalChat(peer) }
+            catch (error: Exception) { chatStorageError(error) }
+            finally { messageExpiryJobs.remove(key) }
         }
     }
 

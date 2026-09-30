@@ -4,6 +4,11 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class BackNavigationPolicyTest {
+    @Test fun offlineLocalChatMinimizesInsteadOfExiting() {
+        for (phase in listOf(CallPhase.READY, CallPhase.SERVER_ERROR, CallPhase.CONNECTING_SERVER)) {
+            assertEquals(BackNavigationAction.CLOSE_CHAT, BackNavigationPolicy.resolve(phase, true, true))
+        }
+    }
     @Test
     fun backFromChatReturnsToHome() {
         assertEquals(

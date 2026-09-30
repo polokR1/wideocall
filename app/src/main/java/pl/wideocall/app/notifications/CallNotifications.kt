@@ -78,7 +78,9 @@ object CallNotifications {
         }
     }
 
-    fun showIncoming(context: Context, callerId: String, callId: String) {
+    @Synchronized fun showIncoming(context: Context, callerId: String, callId: String) {
+        val handled = context.getSharedPreferences("handled_calls", Context.MODE_PRIVATE)
+        if (handled.getLong(callId, 0L) > System.currentTimeMillis()) return
         createChannels(context)
         val person = Person.Builder().setName(callerId).setImportant(true).build()
         val answer = callIntent(context, ACTION_ANSWER, callerId, callId, 10)
@@ -93,16 +95,24 @@ object CallNotifications {
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setOngoing(true)
             .setAutoCancel(false)
+            .setOnlyAlertOnce(true)
             .setTimeoutAfter(35_000L)
             .setFullScreenIntent(showIncoming, true)
             .setContentIntent(showIncoming)
             .setStyle(NotificationCompat.CallStyle.forIncomingCall(person, decline, answer))
             .build()
+        notification.flags = notification.flags or android.app.Notification.FLAG_INSISTENT
         context.getSystemService(NotificationManager::class.java).notify(notificationId(callId), notification)
     }
 
-    fun cancel(context: Context, callId: String?) {
+    @Synchronized fun cancel(context: Context, callId: String?) {
         if (callId == null) return
+        val handled = context.getSharedPreferences("handled_calls", Context.MODE_PRIVATE)
+        val now = System.currentTimeMillis()
+        handled.edit().apply {
+            handled.all.forEach { (key, value) -> if ((value as? Long ?: 0L) <= now) remove(key) }
+            putLong(callId, now + 120_000L)
+        }.apply()
         context.getSystemService(NotificationManager::class.java).cancel(notificationId(callId))
     }
 
