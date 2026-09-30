@@ -13,8 +13,8 @@ android {
         applicationId = "pl.wideocall.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 17
-        versionName = "0.13.0"
+        versionCode = 18
+        versionName = "0.13.1"
         buildConfigField("boolean", "FCM_ENABLED", "true")
         buildConfigField(
             "String",

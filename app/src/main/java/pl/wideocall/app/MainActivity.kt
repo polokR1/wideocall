@@ -113,6 +113,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.SecureFlagPolicy
 import org.webrtc.EglBase
 import org.webrtc.RendererCommon
 import org.webrtc.SurfaceViewRenderer
@@ -455,9 +456,15 @@ private fun PermissionGate(
         AlertDialog(
             onDismissRequest = { showExitConfirmation = false },
             title = { Text("Wyjść z Wideocall?") },
-            text = { Text("Aplikacja zostanie zamknięta. Nadal możesz otrzymywać połączenia przez powiadomienia systemowe.") },
+            text = { Text(if (state.callId != null) "Aplikacja zostanie schowana. Aktywna sesja nie zostanie zakończona. Aby ją zakończyć, użyj przycisku zakończenia." else "Aplikacja zostanie zamknięta. Nadal możesz otrzymywać połączenia przez powiadomienia systemowe.") },
             confirmButton = {
-                Button(onClick = { context.findActivity()?.finish() }) { Text("Wyjdź") }
+                Button(onClick = {
+                    showExitConfirmation = false
+                    val activity = context.findActivity()
+                    if (state.callId != null) {
+                        if (activity?.moveTaskToBack(true) != true) Toast.makeText(context, "Nie udało się schować aplikacji. Sesja nadal trwa.", Toast.LENGTH_SHORT).show()
+                    } else activity?.finish()
+                }) { Text(if (state.callId != null) "Schowaj" else "Wyjdź") }
             },
             dismissButton = {
                 TextButton(onClick = { showExitConfirmation = false }) { Text("Zostań") }
@@ -1140,12 +1147,13 @@ private fun ChatScreen(state: AppUiState, viewModel: CallViewModel) {
             }
         }
         Spacer(Modifier.height(12.dp))
-        SecurityStatusIcon(state)
+        SecurityStatusIcon(state, onVerify = { viewModel.markCurrentPeerVerified(state.callId, state.safetyNumber.orEmpty()) })
         Spacer(Modifier.height(12.dp))
         EphemeralChatPanel(
             state = state,
             onClose = viewModel::closeChatLocally,
             onSend = viewModel::sendChatMessage,
+            onDraftChanged = viewModel::setChatDraft,
             sendEnabled = state.phase in setOf(CallPhase.IN_CHAT, CallPhase.IN_CALL) && state.chatReady,
             expanded = true,
             modifier = Modifier.fillMaxWidth().weight(1f),
@@ -1313,7 +1321,7 @@ private fun VideoCallScreen(state: AppUiState, viewModel: CallViewModel) {
         ) {
             Text(state.remoteName ?: state.remoteId.orEmpty(), color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
             Text(state.status, color = Color.White.copy(alpha = .7f))
-            SecurityStatusIcon(state, modifier = Modifier.padding(top = 8.dp), dark = true)
+            SecurityStatusIcon(state, onVerify = { viewModel.markCurrentPeerVerified(state.callId, state.safetyNumber.orEmpty()) }, modifier = Modifier.padding(top = 8.dp), dark = true)
         }
         Row(
             modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 44.dp),
@@ -1358,40 +1366,67 @@ private fun VideoCallScreen(state: AppUiState, viewModel: CallViewModel) {
 }
 
 @Composable
-private fun SecurityStatusIcon(
+internal fun SecurityStatusIcon(
     state: AppUiState,
+    onVerify: () -> Boolean,
     modifier: Modifier = Modifier,
     dark: Boolean = false,
 ) {
-    if (state.safetyNumber == null) return
+    val number = state.safetyNumber ?: return
+    var showVerification by remember(state.callId, number) { mutableStateOf(false) }
+    var verificationError by remember(state.callId, number) { mutableStateOf<String?>(null) }
     val container = if (dark) Color(0xCC173B2E) else Color(0xFFE3F8ED)
-    val content = if (dark) Color(0xFF62E6A7) else Color(0xFF16734A)
+    val content = if (!state.peerIdentityVerified) Color(0xFFE5A326) else if (dark) Color(0xFF62E6A7) else Color(0xFF16734A)
     Surface(
-        modifier = modifier.size(28.dp),
+        onClick = { showVerification = true },
+        modifier = modifier.size(44.dp),
         color = container,
         shape = CircleShape,
     ) {
         Box(contentAlignment = Alignment.Center) {
             Icon(
-                Icons.Default.CheckCircle,
-                contentDescription = "Tożsamość i szyfrowanie połączenia są prawidłowe",
+                if (state.peerIdentityVerified) Icons.Default.CheckCircle else Icons.Default.Lock,
+                contentDescription = if (state.peerIdentityVerified) "Tożsamość ręcznie potwierdzona — numer bezpieczeństwa" else "Transport szyfrowany — dotknij, aby zweryfikować rozmówcę",
                 tint = content,
                 modifier = Modifier.size(18.dp),
             )
         }
     }
+    if (showVerification) {
+        AlertDialog(
+            onDismissRequest = { showVerification = false },
+            properties = DialogProperties(securePolicy = SecureFlagPolicy.SecureOn),
+            title = { Text("Zweryfikuj rozmówcę") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text("Porównaj cały numer z ${state.remoteName ?: state.remoteId.orEmpty()} przez niezależny, zaufany kanał lub osobiście. Oba telefony muszą pokazywać identyczny numer. Samo szyfrowanie nie potwierdza, kim jest druga osoba.")
+                    Text(number, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyLarge)
+                    Text(if (state.peerIdentityVerified) "Tożsamość została ręcznie potwierdzona." else "Tożsamość nie została jeszcze ręcznie potwierdzona.")
+                    verificationError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    if (onVerify()) showVerification = false
+                    else verificationError = "Nie zapisano potwierdzenia. Sprawdź, czy sesja nadal trwa i numer nie zmienił się."
+                }, enabled = !state.peerIdentityVerified) { Text("Numery są identyczne") }
+            },
+            dismissButton = { TextButton(onClick = { showVerification = false }) { Text("Zamknij") } },
+        )
+    }
 }
 
 @Composable
-private fun EphemeralChatPanel(
+internal fun EphemeralChatPanel(
     state: AppUiState,
     onClose: () -> Unit,
-    onSend: (String) -> Unit,
+    onSend: (String) -> Boolean,
+    onDraftChanged: (String) -> Unit,
     modifier: Modifier = Modifier,
     sendEnabled: Boolean = true,
     expanded: Boolean = false,
 ) {
-    var text by remember { mutableStateOf("") }
+    val text = state.chatDraft
     val cardModifier = if (expanded) {
         modifier.fillMaxWidth().fillMaxHeight()
     } else {
@@ -1443,10 +1478,13 @@ private fun EphemeralChatPanel(
                     }
                 }
             }
+            state.chatSendError?.let {
+                Text(it, color = Color(0xFFFF9B9B), style = MaterialTheme.typography.bodySmall)
+            }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 OutlinedTextField(
                     value = text,
-                    onValueChange = { text = it.take(1_000) },
+                    onValueChange = onDraftChanged,
                     modifier = Modifier.weight(1f),
                     enabled = sendEnabled,
                     placeholder = { Text("Wiadomość…") },
@@ -1466,7 +1504,6 @@ private fun EphemeralChatPanel(
                     keyboardActions = KeyboardActions(onSend = {
                         if (text.isNotBlank()) {
                             onSend(text)
-                            text = ""
                         }
                     }),
                 )
@@ -1474,7 +1511,6 @@ private fun EphemeralChatPanel(
                     onClick = {
                         if (text.isNotBlank()) {
                             onSend(text)
-                            text = ""
                         }
                     },
                     enabled = sendEnabled && text.isNotBlank(),
@@ -1749,7 +1785,7 @@ private fun SettingsDialog(
                             StatusLine("Blokada zrzutów w tajnym czacie", true)
                             StatusLine("Pliki bez bazy • SHA-256", true)
                             Text(
-                                "Wiadomości nie są zapisywane w bazie i znikają 60 sekund po ich otwarciu. Pliki są przesyłane szyfrowanym kanałem WebRTC i weryfikowane przed zapisem. Numer bezpieczeństwa pozwala zweryfikować rozmówcę.",
+                                "Wiadomości nie są zapisywane w bazie i znikają 60 sekund po ich otwarciu. Pliki są przesyłane szyfrowanym kanałem WebRTC i weryfikowane przed zapisem. Dotknij kłódki w rozmowie lub czacie, aby porównać numer bezpieczeństwa. Złota kłódka oznacza tożsamość niepotwierdzoną ręcznie; zielona — potwierdzoną.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -1760,12 +1796,8 @@ private fun SettingsDialog(
                         SettingsSection("Stan usług") {
                             StatusLine(
                                 "Sygnalizacja Cloudflare",
-                                state.phase != CallPhase.SERVER_ERROR && state.phase != CallPhase.CONNECTING_SERVER,
-                                when (state.phase) {
-                                    CallPhase.CONNECTING_SERVER -> "łączenie"
-                                    CallPhase.SERVER_ERROR -> "błąd"
-                                    else -> "połączono"
-                                },
+                                state.signalingConnected,
+                                if (state.signalingConnected) "połączono" else "odnawianie",
                             )
                             StatusLine("Wybudzanie FCM", BuildConfig.FCM_ENABLED)
                             StatusLine("Przekaźnik TURN", BuildConfig.TURN_CREDENTIALS_URL.isNotBlank(), "automatyczny")

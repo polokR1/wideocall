@@ -9,6 +9,16 @@ const key = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
 const identityKey = key.publicKey.export({ type: "spki", format: "der" }).toString("base64");
 const timestamp = Date.now();
 
+// Use only this newly generated test ID, never a real user's identity.
+// An invalid first request must not poison later legitimate authorization.
+const rejected = await fetch(`${WORKER_URL}/turn-credentials`, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ userId, operation: "turn", timestamp,
+    identityKey: "a".repeat(100), signature: "b".repeat(80) }),
+});
+assert.equal(rejected.status, 401, "An invalid device signature must be rejected");
+
 function payload(values) {
   const chunks = [];
   for (const value of values) {
@@ -34,4 +44,4 @@ assert.ok(Array.isArray(turn.iceServers), "TURN response has no ICE server list"
 const relay = turn.iceServers.find((server) => server.username && server.credential && server.urls?.some((url) => url.startsWith("turn:") || url.startsWith("turns:")));
 assert.ok(relay, "TURN response has no authenticated relay server");
 assert.ok(turn.expiresAt > Date.now() + 23 * 60 * 60 * 1000, "TURN credentials expire too soon");
-console.log(JSON.stringify({ ok: true, cloudflareDeviceAuth: true, turnCredentialsIssued: true, iceServerCount: turn.iceServers.length, relayUrlCount: relay.urls.length, ttlHours: Math.round((turn.expiresAt - Date.now()) / 3_600_000) }));
+console.log(JSON.stringify({ ok: true, invalidRequestDoesNotPoisonIdentity: true, cloudflareDeviceAuth: true, turnCredentialsIssued: true, iceServerCount: turn.iceServers.length, relayUrlCount: relay.urls.length, ttlHours: Math.round((turn.expiresAt - Date.now()) / 3_600_000) }));

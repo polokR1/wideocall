@@ -81,6 +81,9 @@ data class AppUiState(
     val frontCamera: Boolean = true,
     val chatMessages: List<EphemeralChatMessage> = emptyList(),
     val chatReady: Boolean = false,
+    val chatDraft: String = "",
+    val chatSendError: String? = null,
+    val signalingConnected: Boolean = false,
     val chatVisible: Boolean = false,
     val safetyNumber: String? = null,
     val peerIdentityVerified: Boolean = false,
@@ -199,7 +202,8 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         reconnectAttempt = 0
         reconnectJob?.cancel()
         reconnectJob = null
-        _state.update { it.copy(phase = CallPhase.CONNECTING_SERVER, status = "Łączenie z usługą rozmów…", diagnostic = null) }
+        signalingConnected = false
+        _state.update { SessionStatePolicy.refreshing(it, hasActiveSession()) }
         signalingClient.connect(_state.value.myId)
     }
 
@@ -421,7 +425,10 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     }
 
     private fun startOutgoingSession(contact: Contact, sessionKind: String) {
-        if (_state.value.phase != CallPhase.READY) return
+        if (_state.value.phase != CallPhase.READY || !signalingConnected || activeCallId != null) {
+            _state.update { it.copy(diagnostic = "Sesja: brak gotowej sygnalizacji lub inna sesja nadal trwa.") }
+            return
+        }
         val callId = UUID.randomUUID().toString()
         activeCallId = callId
         activeRemoteId = contact.id
@@ -475,7 +482,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
             runCatching { DirectFileTransferService.start(getApplication(), contact.name, callId) }
                 .onFailure { error -> _state.update { it.copy(diagnostic = "Transfer w tle: ${error.javaClass.simpleName}.") } }
         }
-        startOutgoingTimeout(callId, contact.id)
+        startSetupTimeout(callId, contact.id)
         prepareWebRtcSession(callId, isCaller = true, withMedia = !dataOnly) {
             webRtcClient.createOffer { offer ->
                 val sent = signalingClient.send(
@@ -571,7 +578,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 fileVisible = fileOnly,
             )
         }
-        callTimeoutJob?.cancel()
+        startSetupTimeout(callId, remoteId)
         CallNotifications.cancel(getApplication(), offer.callId)
         ChatNotifications.cancel(getApplication(), offer.callId)
         FileTransferNotifications.cancel(getApplication(), offer.callId)
@@ -748,14 +755,24 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         FileTransferNotifications.cancel(getApplication(), activeCallId)
     }
 
-    fun sendChatMessage(raw: String) {
-        if (_state.value.phase !in setOf(CallPhase.IN_CALL, CallPhase.IN_CHAT) || !_state.value.chatReady) return
-        val text = EphemeralChatPolicy.sanitize(raw)
-        if (text.isBlank()) return
+    fun setChatDraft(raw: String) {
+        _state.update { it.copy(chatDraft = raw.take(1_000), chatSendError = null) }
+    }
+
+    fun sendChatMessage(raw: String): Boolean {
+        val current = _state.value
+        val result = ChatSendPolicy.send(raw, current.phase, current.chatReady) { text ->
+            webRtcClient.sendChatMessage(JSONObject().put("text", text).toString())
+        }
+        val text = result.getOrElse { error ->
+            _state.update { it.copy(chatDraft = raw.take(1_000), chatSendError = error.message ?: "Błąd wysyłania wiadomości. Tekst zachowano.") }
+            return false
+        }
         val now = System.currentTimeMillis()
         val message = EphemeralChatMessage(UUID.randomUUID().toString(), text, true, now, now)
-        val payload = JSONObject().put("text", message.text).toString()
-        if (webRtcClient.sendChatMessage(payload)) addChatMessage(message)
+        addChatMessage(message)
+        _state.update { it.copy(chatDraft = "", chatSendError = null) }
+        return true
     }
 
     fun bindLocalRenderer(renderer: SurfaceViewRenderer?) = webRtcClient.bindLocalRenderer(renderer)
@@ -769,36 +786,13 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         reconnectJob = null
         TurnCredentialProvider.prefetch(_state.value.myId)
         signalingClient.observeContacts(_state.value.contacts.map(Contact::id))
-        if (_state.value.phase in listOf(CallPhase.CONNECTING_SERVER, CallPhase.SERVER_ERROR, CallPhase.READY)) {
-            _state.update { it.copy(phase = CallPhase.READY, status = "Gotowy do rozmowy", diagnostic = null) }
-        } else if (hasActiveSession() && iceConnected) {
-            _state.update {
-                it.copy(status = when (activeSessionKind) {
-                    SignalMessage.SESSION_CHAT -> "Szyfrowany czat połączony"
-                    SignalMessage.SESSION_FILE -> "Prywatny transfer połączony"
-                    else -> "Połączono"
-                })
-            }
-        }
+        _state.update { SessionStatePolicy.signalingReady(it, hasActiveSession(), iceConnected, activeSessionKind) }
     }
 
     override fun onDisconnected(reason: String) = onMain {
         signalingConnected = false
-        if (hasActiveSession()) {
-            _state.update { it.copy(status = "Połączenie trwa • odnawiam sygnalizację…") }
-            scheduleReconnect(preserveActiveSession = true)
-        } else if (_state.value.phase == CallPhase.READY || _state.value.phase == CallPhase.CONNECTING_SERVER) {
-            _state.update {
-                it.copy(
-                    phase = CallPhase.SERVER_ERROR,
-                    status = "$reason • ponawiam połączenie…",
-                    diagnostic = "Sygnalizacja Cloudflare: $reason",
-                )
-            }
-            scheduleReconnect(preserveActiveSession = false)
-        } else {
-            failCall("Utracono połączenie z serwerem")
-        }
+        _state.update { SessionStatePolicy.signalingLost(it, hasActiveSession(), reason) }
+        scheduleReconnect()
     }
 
     override fun onMessage(message: SignalMessage) = onMain {
@@ -888,6 +882,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     }
 
     override fun onConnectionStateChanged(state: RtcConnectionState) = onMain {
+        if (!hasActiveSession()) return@onMain
         if (state == RtcConnectionState.CONNECTED) {
             outgoingRingback.stop()
             iceConnected = true
@@ -895,23 +890,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
             iceRecoveryJob = null
             val chatOnly = activeSessionKind == SignalMessage.SESSION_CHAT
             val fileOnly = activeSessionKind == SignalMessage.SESSION_FILE
-            _state.update {
-                it.copy(
-                    phase = when {
-                        chatOnly -> CallPhase.IN_CHAT
-                        fileOnly -> CallPhase.IN_FILE
-                        else -> CallPhase.IN_CALL
-                    },
-                    status = when {
-                        chatOnly -> "Szyfrowany czat połączony"
-                        fileOnly -> "Prywatny transfer połączony"
-                        else -> "Połączono"
-                    },
-                    chatVisible = chatOnly || it.chatVisible,
-                    fileVisible = fileOnly || it.fileVisible,
-                    diagnostic = null,
-                )
-            }
+            _state.update { SessionStatePolicy.transportConnected(it, activeSessionKind) }
             callTimeoutJob?.cancel()
             if (!chatOnly && !fileOnly) {
                 val callId = activeCallId
@@ -931,11 +910,13 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     }
 
     override fun onChatReadyChanged(ready: Boolean) = onMain {
+        if (!hasActiveSession()) return@onMain
         _state.update { it.copy(chatReady = ready) }
         if (ready && activeSessionKind == SignalMessage.SESSION_FILE) fileTransferManager.onChannelReady()
     }
 
     override fun onChatMessage(message: String) = onMain {
+        if (!hasActiveSession()) return@onMain
         if (activeSessionKind == SignalMessage.SESSION_FILE && fileTransferManager.onText(message)) return@onMain
         val parsed = runCatching {
             val json = JSONObject(message)
@@ -972,10 +953,16 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         _state.update { it.copy(diagnostic = message) }
     }
 
-    fun markCurrentPeerVerified() {
-        val remoteId = activeRemoteId ?: return
-        if (_state.value.safetyNumber == null || !peerIdentityStore.markVerified(remoteId)) return
+    fun markCurrentPeerVerified(expectedCallId: String?, expectedNumber: String): Boolean {
+        val remoteId = activeRemoteId ?: return false
+        if (activeCallId != expectedCallId || _state.value.safetyNumber != expectedNumber) return false
+        val verified = runCatching { peerIdentityStore.markVerified(remoteId) }.getOrDefault(false)
+        if (!verified) {
+            _state.update { it.copy(diagnostic = "Nie udało się zapisać potwierdzenia tożsamości.") }
+            return false
+        }
         _state.update { it.copy(peerIdentityVerified = true) }
+        return true
     }
 
     private fun authenticateMessage(message: SignalMessage): Boolean {
@@ -994,7 +981,10 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
             blockUntrustedMessage(message, "Klucz bezpieczeństwa kontaktu zmienił się — połączenie zablokowane")
             return false
         }
-        if (!message.type.startsWith("contact-")) {
+        // A second caller or a delayed signal must not replace the active peer's verification number.
+        if (!message.type.startsWith("contact-") &&
+            (isActiveMessage(message) || (message.type == "offer" && activeCallId == null))
+        ) {
             _state.update {
                 it.copy(
                     safetyNumber = trust.safetyNumber,
@@ -1242,13 +1232,15 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         pendingIncomingCandidates.clear()
         _state.update {
             it.copy(
-                phase = CallPhase.SERVER_ERROR,
+                phase = SessionStatePolicy.idlePhase(signalingConnected),
                 status = message,
                 remoteId = null,
                 remoteName = null,
                 callId = null,
                 chatMessages = emptyList(),
                 chatReady = false,
+                chatDraft = "",
+                chatSendError = null,
                 chatVisible = false,
                 callVisible = true,
                 unreadChatCount = 0,
@@ -1259,6 +1251,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 fileVisible = false,
             )
         }
+        if (!signalingConnected) scheduleReconnect()
     }
 
     private fun clearCall(status: String, telecomEnd: TelecomEnd = TelecomEnd.LOCAL) {
@@ -1294,8 +1287,8 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         pendingIncomingCandidates.clear()
         _state.update {
             it.copy(
-                phase = CallPhase.READY,
-                status = status,
+                phase = SessionStatePolicy.idlePhase(signalingConnected),
+                status = if (signalingConnected) status else "$status • odnawiam sygnalizację…",
                 remoteId = null,
                 remoteName = null,
                 callId = null,
@@ -1306,6 +1299,8 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 frontCamera = true,
                 chatMessages = emptyList(),
                 chatReady = false,
+                chatDraft = "",
+                chatSendError = null,
                 chatVisible = false,
                 callVisible = true,
                 unreadChatCount = 0,
@@ -1315,6 +1310,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 fileVisible = false,
             )
         }
+        if (!signalingConnected) scheduleReconnect()
     }
 
     private fun addChatMessage(message: EphemeralChatMessage) {
@@ -1332,17 +1328,12 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         }
     }
 
-    private fun startOutgoingTimeout(callId: String, remoteId: String) {
+    private fun startSetupTimeout(callId: String, remoteId: String) {
         callTimeoutJob?.cancel()
         callTimeoutJob = viewModelScope.launch {
             delay(CALL_TIMEOUT_MS)
-            if (activeCallId == callId && _state.value.phase in setOf(
-                    CallPhase.OUTGOING,
-                    CallPhase.CONNECTING_CALL,
-                    CallPhase.CONNECTING_CHAT,
-                    CallPhase.CONNECTING_FILE,
-                )
-            ) {
+            if (SessionStatePolicy.shouldExpireSetup(callId, activeCallId, _state.value.phase)) {
+                val wasRinging = _state.value.phase == CallPhase.OUTGOING
                 signalingClient.send(
                     SignalMessage(
                         type = "hangup",
@@ -1356,10 +1347,11 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                     when (activeSessionKind) {
                         SignalMessage.SESSION_CHAT -> "Nie udało się połączyć czatu"
                         SignalMessage.SESSION_FILE -> "Nie udało się rozpocząć transferu"
-                        else -> "Nie odebrano"
+                        else -> if (wasRinging) "Nie odebrano" else "Nie udało się zestawić rozmowy"
                     },
                     if (activeSessionKind == SignalMessage.SESSION_VIDEO) TelecomEnd.MISSED else TelecomEnd.NONE,
                 )
+                _state.update { it.copy(diagnostic = "WebRTC: przekroczono limit ${CALL_TIMEOUT_MS / 1_000} sekund na zestawienie sesji. Sprawdź sieć obu telefonów.") }
             }
         }
     }
@@ -1385,17 +1377,17 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         }
     }
 
-    private fun scheduleReconnect(preserveActiveSession: Boolean) {
+    private fun scheduleReconnect() {
         if (reconnectJob?.isActive == true) return
         reconnectJob = viewModelScope.launch {
             val delayMs = RECONNECT_DELAYS_MS[reconnectAttempt.coerceAtMost(RECONNECT_DELAYS_MS.lastIndex)]
             reconnectAttempt = (reconnectAttempt + 1).coerceAtMost(RECONNECT_DELAYS_MS.lastIndex)
             delay(delayMs)
             reconnectJob = null
-            if (preserveActiveSession && hasActiveSession()) {
+            if (!signalingConnected) {
+                // Re-evaluate actual network readiness after the delay, even if the session ended.
+                _state.update { SessionStatePolicy.refreshing(it, hasActiveSession()) }
                 signalingClient.connect(_state.value.myId)
-            } else if (_state.value.phase == CallPhase.SERVER_ERROR) {
-                connect()
             }
         }
     }
@@ -1488,18 +1480,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     private fun isActiveMessage(message: SignalMessage): Boolean =
         message.callId != null && message.callId == activeCallId && message.from == activeRemoteId
 
-    private fun hasActiveSession(): Boolean = activeCallId != null && _state.value.phase in setOf(
-        CallPhase.OUTGOING,
-        CallPhase.INCOMING,
-        CallPhase.INCOMING_CHAT,
-        CallPhase.INCOMING_FILE,
-        CallPhase.CONNECTING_CALL,
-        CallPhase.IN_CALL,
-        CallPhase.CONNECTING_CHAT,
-        CallPhase.IN_CHAT,
-        CallPhase.CONNECTING_FILE,
-        CallPhase.IN_FILE,
-    )
+    private fun hasActiveSession(): Boolean = activeCallId != null
 
     private fun onMain(block: () -> Unit) {
         viewModelScope.launch(Dispatchers.Main.immediate) { block() }

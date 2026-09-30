@@ -183,12 +183,13 @@ export class SignalHub {
     if (requiredOperation && packet.operation !== requiredOperation) return false;
     const timestamp = Number(packet.timestamp);
     if (!Number.isFinite(timestamp) || Math.abs(Date.now() - timestamp) > MAX_AUTH_AGE_MS) return false;
-    if (!await this.acceptIdentity(packet.userId, packet.identityKey)) return false;
-    return verifySignature(
+    // Never persist a first-use identity until possession of its private key is proven.
+    const valid = await verifySignature(
       packet.identityKey,
       devicePayload(packet.operation, packet.userId, String(timestamp), packet.identityKey),
       packet.signature,
     );
+    return valid && await this.acceptIdentity(packet.userId, packet.identityKey);
   }
 
   async acceptIdentity(userId, identityKey) {

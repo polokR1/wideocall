@@ -50,8 +50,8 @@ class PeerIdentityStore(context: Context) {
         val identities = readIdentities()
         val existing = identities.optJSONObject(remoteId) ?: return false
         existing.put("verified", true)
-        preferences.edit().putString(KEY_IDENTITIES, identities.toString()).apply()
-        return true
+        // Report storage failure rather than claiming a durable manual verification.
+        return preferences.edit().putString(KEY_IDENTITIES, identities.toString()).commit()
     }
 
     private fun readIdentities(): JSONObject = runCatching {
