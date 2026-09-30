@@ -25,7 +25,11 @@ object FileTransferNotifications {
         )
     }
 
-    fun showInvitation(context: Context, callerId: String, sessionId: String) {
+    @Synchronized fun showInvitation(context: Context, callerId: String, sessionId: String) {
+        val now = System.currentTimeMillis()
+        if (context.getSharedPreferences("handled_file_invitations", Context.MODE_PRIVATE).getLong(sessionId, 0L) > now) return
+        val manager = context.getSystemService(NotificationManager::class.java)
+        if (manager.activeNotifications.any { it.id == notificationId(sessionId) }) return
         createChannel(context)
         val intent = Intent(context, MainActivity::class.java).apply {
             action = ACTION_OPEN_FILE_TRANSFER
@@ -47,6 +51,7 @@ object FileTransferNotifications {
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .setAutoCancel(true)
+            .setOnlyAlertOnce(true)
             .setTimeoutAfter(60_000L)
             .build()
         context.getSystemService(NotificationManager::class.java).notify(notificationId(sessionId), notification)
@@ -71,14 +76,23 @@ object FileTransferNotifications {
             .setContentText("$callerId • dotknij, aby zobaczyć postęp")
             .setContentIntent(open)
             .setCategory(NotificationCompat.CATEGORY_PROGRESS)
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .setOngoing(true)
+            .setSilent(true)
+            .setOnlyAlertOnce(true)
             .build()
     }
 
-    fun cancel(context: Context, sessionId: String?) {
+    @Synchronized fun cancel(context: Context, sessionId: String?) {
         if (sessionId == null) return
+        val handled = context.getSharedPreferences("handled_file_invitations", Context.MODE_PRIVATE)
+        val now = System.currentTimeMillis()
+        handled.edit().apply {
+            handled.all.forEach { (key, value) -> if ((value as? Long ?: 0L) <= now) remove(key) }
+            putLong(sessionId, now + 120_000L)
+        }.apply()
         context.getSystemService(NotificationManager::class.java).cancel(notificationId(sessionId))
     }
 

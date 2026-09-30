@@ -2,6 +2,7 @@ package pl.wideocall.app.notifications
 
 import android.annotation.SuppressLint
 import android.app.Service
+import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
@@ -28,6 +29,12 @@ class OngoingCallService : Service() {
         return START_NOT_STICKY
     }
 
+    override fun onDestroy() {
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        getSystemService(NotificationManager::class.java).cancel(ONGOING_NOTIFICATION_ID)
+        super.onDestroy()
+    }
+
     companion object {
         private const val ONGOING_NOTIFICATION_ID = 7643
 
@@ -42,6 +49,7 @@ class OngoingCallService : Service() {
         @SuppressLint("ImplicitSamInstance") // stopService matches the explicit service component, not object identity.
         fun stop(context: Context) {
             context.stopService(Intent(context, OngoingCallService::class.java))
+            context.getSystemService(NotificationManager::class.java).cancel(ONGOING_NOTIFICATION_ID)
         }
     }
 }

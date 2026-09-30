@@ -1,6 +1,10 @@
 package pl.wideocall.app.signaling
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
+import android.util.Log
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -38,33 +42,50 @@ class SignalingClient(
         .retryOnConnectionFailure(true)
         .connectTimeout(8, TimeUnit.SECONDS)
         .writeTimeout(10, TimeUnit.SECONDS)
-        .pingInterval(15, TimeUnit.SECONDS)
+        // A transient mobile-network stall should not close the socket after just 15 seconds.
+        .pingInterval(30, TimeUnit.SECONDS)
         .build()
     private var socket: WebSocket? = null
     private var userId: String? = null
     private var ready = false
+    private var connecting = false
     private var intentionallyClosed = false
     private var connectionGeneration = 0
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var authenticationTimeout: Runnable? = null
+    private var startedAt = 0L
 
-    fun connect(userId: String) {
+    @Synchronized fun connect(userId: String, force: Boolean = false) {
+        if (!ConnectionAttemptPolicy.shouldStart(userId, this.userId, connecting, ready, force)) return
         disconnect()
         this.userId = userId
         intentionallyClosed = false
         ready = false
+        connecting = true
+        startedAt = SystemClock.elapsedRealtime()
         val generation = connectionGeneration
+        Log.i("WideocallSignal", "connect_start generation=$generation")
         val baseUrl = BuildConfig.SIGNALING_WEBSOCKET_URL
         if (baseUrl.isBlank()) return reportDisconnected("Brak konfiguracji szybkiej sygnalizacji")
         socket = httpClient.newWebSocket(Request.Builder().url("$baseUrl/$userId").build(), object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) = Unit
 
-            override fun onMessage(webSocket: WebSocket, text: String) {
-                if (generation != connectionGeneration || intentionallyClosed) return
-                handlePacket(webSocket, text)
+            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                webSocket.close(code, reason)
+                // Waiting for onClosed leaves the UI falsely ready when the close handshake stalls.
+                onClosed(webSocket, code, reason)
             }
 
-            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+            override fun onMessage(webSocket: WebSocket, text: String): Unit = synchronized(this@SignalingClient) {
+                if (generation != connectionGeneration || intentionallyClosed) return
+                runCatching { handlePacket(webSocket, text) }.onFailure {
+                    reportDisconnected("Nie udało się obsłużyć danych sygnalizacji", it)
+                }
+            }
+
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String): Unit = synchronized(this@SignalingClient) {
                 if (generation == connectionGeneration && !intentionallyClosed) {
-                    ready = false
+                    Log.w("WideocallSignal", "socket_closed generation=$generation code=$code")
                     val detail = when (reason) {
                         "invalid_signal_signature" -> "serwer odrzucił podpis sygnału"
                         "authentication_failed" -> "nie udało się potwierdzić tożsamości telefonu"
@@ -76,16 +97,23 @@ class SignalingClient(
                 }
             }
 
-            override fun onFailure(webSocket: WebSocket, throwable: Throwable, response: Response?) {
+            override fun onFailure(webSocket: WebSocket, throwable: Throwable, response: Response?): Unit = synchronized(this@SignalingClient) {
                 if (generation == connectionGeneration && !intentionallyClosed) {
-                    ready = false
+                    Log.w("WideocallSignal", "socket_failed generation=$generation error=${throwable.javaClass.simpleName} http=${response?.code ?: 0}")
                     reportDisconnected("Nie można połączyć się z usługą rozmów", throwable)
                 }
             }
         })
+        authenticationTimeout = Runnable {
+            synchronized(this) {
+                if (generation == connectionGeneration && connecting && !intentionallyClosed) {
+                    reportDisconnected("Usługa rozmów nie potwierdziła połączenia w ciągu 15 sekund")
+                }
+            }
+        }.also { mainHandler.postDelayed(it, 15_000L) }
     }
 
-    fun send(message: SignalMessage): Boolean {
+    @Synchronized fun send(message: SignalMessage): Boolean {
         val currentUserId = userId ?: run {
             listener.onWarning("Sygnalizacja: brak identyfikatora aktywnej sesji.")
             return false
@@ -114,11 +142,15 @@ class SignalingClient(
     fun observeContacts(ids: Collection<String>) = Unit
     fun setBusy(busy: Boolean) = Unit
 
-    fun disconnect() {
+    @Synchronized fun disconnect() {
         connectionGeneration += 1
         intentionallyClosed = true
         ready = false
-        socket?.close(1000, "client_closed")
+        connecting = false
+        authenticationTimeout?.let(mainHandler::removeCallbacks)
+        authenticationTimeout = null
+        // Cancel immediately: closing an unresponsive old socket otherwise leaves it alive for 60 seconds.
+        socket?.cancel()
         socket = null
         userId = null
     }
@@ -144,7 +176,12 @@ class SignalingClient(
                 webSocket.send(JSONObject().put("type", "authenticate").put("userId", id).put("identityKey", identityKey).put("signature", signature).toString())
             }
             "ready" -> {
+                if (ready) return
                 ready = true
+                connecting = false
+                authenticationTimeout?.let(mainHandler::removeCallbacks)
+                authenticationTimeout = null
+                Log.i("WideocallSignal", "socket_ready generation=$connectionGeneration elapsedMs=${SystemClock.elapsedRealtime() - startedAt}")
                 listener.onConnected()
                 com.google.firebase.messaging.FirebaseMessaging.getInstance().token
                     .addOnSuccessListener { token ->
@@ -156,7 +193,10 @@ class SignalingClient(
             }
             "signal" -> packet.optJSONObject("signal")?.let { signal ->
                 runCatching { SignalMessage.fromJson(signal.toString()) }
-                    .onSuccess(listener::onMessage)
+                    .onSuccess {
+                        if (it.type in setOf("offer", "answer", "accepted", "hangup", "reject")) Log.i("WideocallSignal", "signal_received type=${it.type}")
+                        listener.onMessage(it)
+                    }
                     .onFailure { listener.onWarning("Sygnalizacja: odebrano nieprawidłowy format sygnału.") }
             }
             "error" -> listener.onWarning("Sygnalizacja Cloudflare: ${packet.optString("code", "nieznany błąd")}.")
@@ -165,6 +205,15 @@ class SignalingClient(
 
     private fun reportDisconnected(message: String, error: Throwable? = null) {
         if (intentionallyClosed) return
+        Log.w("WideocallSignal", "connection_lost generation=$connectionGeneration elapsedMs=${SystemClock.elapsedRealtime() - startedAt} error=${error?.javaClass?.simpleName ?: "protocol"}")
+        // Invalidate callbacks from this socket before cancellation invokes onFailure.
+        connectionGeneration += 1
+        ready = false
+        connecting = false
+        authenticationTimeout?.let(mainHandler::removeCallbacks)
+        authenticationTimeout = null
+        socket?.cancel()
+        socket = null
         val detail = error?.localizedMessage?.takeIf(String::isNotBlank)
         listener.onDisconnected(if (detail == null) message else "$message: $detail")
     }

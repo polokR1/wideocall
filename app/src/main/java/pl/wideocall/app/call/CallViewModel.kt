@@ -5,7 +5,10 @@ import android.app.Application
 import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.Network
+import android.net.NetworkCapabilities
 import android.net.Uri
+import android.os.SystemClock
+import android.util.Log
 import androidx.core.telecom.CallEndpointCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
@@ -152,6 +155,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                     fileTransfer = transfer,
                     status = when (transfer.status) {
                         FileTransferStatus.WAITING_FOR_PEER -> "Oczekiwanie na drugi telefon…"
+                        FileTransferStatus.WAITING_FOR_ACCEPTANCE -> "Czy chcesz odebrać ten plik?"
                         FileTransferStatus.TRANSFERRING -> if (transfer.direction.name == "SEND") "Wysyłanie pliku…" else "Odbieranie pliku…"
                         FileTransferStatus.VERIFYING -> "Sprawdzanie integralności pliku…"
                         FileTransferStatus.COMPLETE -> "Transfer pliku zakończony"
@@ -176,13 +180,20 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     private var reconnectJob: Job? = null
     private var reconnectAttempt = 0
     private var signalingConnected = false
+    private var defaultNetwork: Network? = null
     private var iceRecoveryJob: Job? = null
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) = onMain {
-            if (!signalingConnected) {
+            val changed = defaultNetwork != null && defaultNetwork != network
+            defaultNetwork = network
+            if (!signalingConnected || changed) {
                 reconnectJob?.cancel()
                 reconnectJob = null
-                signalingClient.connect(_state.value.myId)
+                if (changed) {
+                    signalingConnected = false
+                    _state.update { SessionStatePolicy.refreshing(it, hasActiveSession()) }
+                }
+                signalingClient.connect(_state.value.myId, force = changed)
             }
             if (hasActiveSession() && activeIsCaller) {
                 scheduleIceRecovery(NETWORK_CHANGE_RECOVERY_DELAY_MS)
@@ -190,6 +201,10 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         }
 
         override fun onLost(network: Network) = onMain {
+            if (defaultNetwork != network) return@onMain
+            defaultNetwork = null
+            signalingClient.disconnect()
+            onDisconnected("Utracono połączenie z internetem")
             if (hasActiveSession()) {
                 _state.update {
                     it.copy(
@@ -213,7 +228,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         reconnectJob = null
         signalingConnected = false
         _state.update { SessionStatePolicy.refreshing(it, hasActiveSession()) }
-        signalingClient.connect(_state.value.myId)
+        signalingClient.connect(_state.value.myId, force = true)
     }
 
     fun refreshPreferences() {
@@ -506,6 +521,8 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 .onFailure { error -> _state.update { it.copy(diagnostic = "Transfer w tle: ${error.javaClass.simpleName}.") } }
         }
         startSetupTimeout(callId, contact.id)
+        val preparingAt = SystemClock.elapsedRealtime()
+        Log.i("WideocallCall", "outgoing_prepare kind=$sessionKind")
         prepareWebRtcSession(callId, isCaller = true, withMedia = !dataOnly) {
             webRtcClient.createOffer { offer ->
                 val sent = signalingClient.send(
@@ -519,6 +536,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                         sdp = offer.description,
                     )
                 )
+                Log.i("WideocallCall", "offer_queued kind=$sessionKind elapsedMs=${SystemClock.elapsedRealtime() - preparingAt} success=$sent")
                 if (!sent) failCall("Nie udało się rozpocząć połączenia", "Sygnalizacja: oferta WebRTC nie została wysłana.")
             }
         }
@@ -555,6 +573,10 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
             .onFailure { error -> _state.update { it.copy(diagnostic = "Transfer w tle: ${error.javaClass.simpleName}.") } }
         _state.update { it.copy(fileVisible = true) }
         acceptOffer(offer, withMedia = false)
+    }
+
+    fun acceptReceivedFile() {
+        if (activeSessionKind == SignalMessage.SESSION_FILE && activeCallId != null) fileTransferManager.acceptReceivedFile()
     }
 
     private fun notifyCallAccepted(offer: SignalMessage) {
@@ -725,7 +747,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     }
 
     fun hideFileTransfer() {
-        if (_state.value.phase in setOf(CallPhase.CONNECTING_FILE, CallPhase.IN_FILE) ||
+        if (_state.value.phase in setOf(CallPhase.INCOMING_FILE, CallPhase.CONNECTING_FILE, CallPhase.IN_FILE) ||
             (_state.value.phase == CallPhase.READY && _state.value.fileTransfer != null)
         ) {
             _state.update { it.copy(fileVisible = false) }
@@ -1502,6 +1524,11 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
             delay(delayMs)
             reconnectJob = null
             if (!signalingConnected) {
+                val network = connectivityManager.activeNetwork
+                if (network == null || connectivityManager.getNetworkCapabilities(network)?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) != true) {
+                    _state.update { it.copy(diagnostic = "Sieć: brak połączenia z internetem. Czekam na powrót sieci.") }
+                    return@launch
+                }
                 // Re-evaluate actual network readiness after the delay, even if the session ended.
                 _state.update { SessionStatePolicy.refreshing(it, hasActiveSession()) }
                 signalingClient.connect(_state.value.myId)
@@ -1515,9 +1542,11 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         withMedia: Boolean,
         onPrepared: () -> Unit,
     ) {
+        val requestedAt = SystemClock.elapsedRealtime()
         TurnCredentialProvider.get(_state.value.myId) { turnConfiguration ->
             onMain session@{
                 if (activeCallId != callId) return@session
+                Log.i("WideocallCall", "turn_ready elapsedMs=${SystemClock.elapsedRealtime() - requestedAt} available=${turnConfiguration != null}")
                 if (turnConfiguration == null) {
                     _state.update {
                         it.copy(diagnostic = TurnCredentialProvider.diagnostic() ?: "TURN: brak przekaźnika; próbuję połączenia bezpośredniego przez STUN.")

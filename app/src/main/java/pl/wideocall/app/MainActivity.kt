@@ -334,7 +334,7 @@ private fun PermissionGate(
                 consumeNotificationAction()
             }
             FileTransferNotifications.ACTION_OPEN_FILE_TRANSFER -> if (state.phase == CallPhase.INCOMING_FILE) {
-                viewModel.acceptIncomingFile(action.callId)
+                viewModel.openFileTransfer()
                 consumeNotificationAction()
             } else if (state.phase in setOf(CallPhase.CONNECTING_FILE, CallPhase.IN_FILE)) {
                 viewModel.openFileTransfer()
@@ -343,7 +343,7 @@ private fun PermissionGate(
         }
     }
     BackHandler {
-        if (state.fileVisible && (state.phase in setOf(CallPhase.CONNECTING_FILE, CallPhase.IN_FILE) || state.fileTransfer != null)) {
+        if (state.fileVisible && (state.phase in setOf(CallPhase.INCOMING_FILE, CallPhase.CONNECTING_FILE, CallPhase.IN_FILE) || state.fileTransfer != null)) {
             viewModel.hideFileTransfer()
         } else {
             when (BackNavigationPolicy.resolve(state.phase, state.chatVisible, state.callVisible)) {
@@ -454,6 +454,17 @@ private fun PermissionGate(
                     notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                 }
             },
+        )
+    }
+    if (state.phase == CallPhase.INCOMING_FILE && state.fileVisible) {
+        AlertDialog(
+            onDismissRequest = viewModel::hideFileTransfer,
+            title = { Text("Prośba o przesłanie pliku") },
+            text = { Text("${state.remoteName ?: state.remoteId.orEmpty()} chce przesłać plik. Pokażemy nazwę i rozmiar przed rozpoczęciem odbioru. Plik nie zostanie odebrany automatycznie.") },
+            confirmButton = {
+                Button(onClick = { state.callId?.let(viewModel::acceptIncomingFile) }) { Text("Zobacz plik") }
+            },
+            dismissButton = { TextButton(onClick = viewModel::rejectIncomingDataSession) { Text("Odrzuć") } },
         )
     }
     if (showExitConfirmation) {
@@ -1230,6 +1241,11 @@ private fun FileTransferScreen(state: AppUiState, viewModel: CallViewModel) {
             Text(it, color = MaterialTheme.colorScheme.error, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 8.dp))
         }
         Spacer(Modifier.weight(1f))
+        if (transfer?.status == FileTransferStatus.WAITING_FOR_ACCEPTANCE) {
+            Text("Odbiór rozpocznie się tylko za Twoją zgodą.", textAlign = TextAlign.Center)
+            Button(onClick = viewModel::acceptReceivedFile, modifier = Modifier.fillMaxWidth()) { Text("Odbierz plik") }
+            Spacer(Modifier.height(10.dp))
+        }
         if (transfer?.direction == FileTransferDirection.RECEIVE && transfer.status == FileTransferStatus.COMPLETE) {
             Button(
                 onClick = { saveLauncher.launch(transfer.fileName) },

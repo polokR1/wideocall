@@ -22,6 +22,7 @@ enum class FileTransferDirection { SEND, RECEIVE }
 enum class FileTransferStatus {
     IDLE,
     WAITING_FOR_PEER,
+    WAITING_FOR_ACCEPTANCE,
     TRANSFERRING,
     VERIFYING,
     COMPLETE,
@@ -179,6 +180,16 @@ class DirectFileTransferManager(
         val mime = json.optString("mime").take(120).ifBlank { "application/octet-stream" }
         val size = json.optLong("size", -1L)
         if (id.length !in 8..128 || size !in 1..MAX_FILE_BYTES) return fail("Nieprawidłowe dane pliku.")
+        fileId = id
+        // No file, stream or binary acknowledgement exists until the recipient consents.
+        update(FileTransferState(FileTransferDirection.RECEIVE, name, mime, size,
+            status = FileTransferStatus.WAITING_FOR_ACCEPTANCE))
+    }
+
+    @Synchronized
+    fun acceptReceivedFile() {
+        val current = state ?: return
+        if (current.direction != FileTransferDirection.RECEIVE || current.status != FileTransferStatus.WAITING_FOR_ACCEPTANCE) return
         runCatching {
             val directory = File(appContext.cacheDir, "received-files").apply { mkdirs() }
             val temp = File.createTempFile("wideocall-", ".part", directory)
@@ -186,16 +197,7 @@ class DirectFileTransferManager(
             receiveStream = BufferedOutputStream(FileOutputStream(temp))
             receiveDigest = MessageDigest.getInstance("SHA-256")
             receivedBytes = 0L
-            fileId = id
-            update(
-                FileTransferState(
-                    direction = FileTransferDirection.RECEIVE,
-                    fileName = name,
-                    mimeType = mime,
-                    totalBytes = size,
-                    status = FileTransferStatus.TRANSFERRING,
-                )
-            )
+            update(current.copy(status = FileTransferStatus.TRANSFERRING))
             if (!sendControl("accept")) error("Nie udało się potwierdzić odbioru")
         }.onFailure { fail("Nie można przygotować miejsca na plik: ${it.javaClass.simpleName}.") }
     }
@@ -203,7 +205,7 @@ class DirectFileTransferManager(
     private fun startSending(id: String) {
         val current = state ?: return
         val uri = outgoingUri ?: return fail("Utracono dostęp do wybranego pliku.")
-        if (current.direction != FileTransferDirection.SEND || id != fileId || sendJob?.isActive == true) return
+        if (current.direction != FileTransferDirection.SEND || current.status != FileTransferStatus.WAITING_FOR_PEER || id != fileId || sendJob?.isActive == true) return
         update(current.copy(status = FileTransferStatus.TRANSFERRING))
         sendJob = scope.launch(Dispatchers.IO) {
             runCatching {
@@ -243,7 +245,7 @@ class DirectFileTransferManager(
     @Synchronized
     private fun completeReceive(id: String, expectedHash: String) {
         val current = state ?: return
-        if (current.direction != FileTransferDirection.RECEIVE || id != fileId) return
+        if (current.direction != FileTransferDirection.RECEIVE || current.status != FileTransferStatus.TRANSFERRING || id != fileId) return
         update(current.copy(status = FileTransferStatus.VERIFYING, transferredBytes = receivedBytes))
         runCatching {
             receiveStream?.flush()
