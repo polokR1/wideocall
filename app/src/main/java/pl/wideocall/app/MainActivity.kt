@@ -21,6 +21,8 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import pl.wideocall.app.call.CallScreenAwakePolicy
+import pl.wideocall.app.call.CallScreenController
 import androidx.core.net.toUri
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
@@ -149,6 +151,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         refreshFullScreenIntentPermission()
         captureNotificationAction(intent)
+        CallScreenController.bind(this, window, viewModel.state)
         setContent {
             WideocallTheme {
                 val action by notificationAction.collectAsState()
@@ -181,6 +184,21 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         refreshFullScreenIntentPermission()
         viewModel.onAppVisible()
+        applyCallScreenAwake()
+    }
+
+    private fun applyCallScreenAwake() {
+        CallScreenController.apply(window, CallScreenAwakePolicy.enabled(viewModel.state.value.phase))
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) applyCallScreenAwake()
+    }
+
+    override fun onStop() {
+        CallScreenController.apply(window, false)
+        super.onStop()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -273,14 +291,6 @@ private fun PermissionGate(
 
     val state by viewModel.state.collectAsState()
     var showExitConfirmation by remember { mutableStateOf(false) }
-    KeepScreenAwake(
-        enabled = state.phase in setOf(
-            CallPhase.OUTGOING,
-            CallPhase.INCOMING,
-            CallPhase.CONNECTING_CALL,
-            CallPhase.IN_CALL,
-        ),
-    )
     SecureChatWindow(
         enabled = state.phase in setOf(
             CallPhase.CONNECTING_CHAT,
@@ -485,21 +495,6 @@ private fun PermissionGate(
                 TextButton(onClick = { showExitConfirmation = false }) { Text("Zostań") }
             },
         )
-    }
-}
-
-@Composable
-private fun KeepScreenAwake(enabled: Boolean) {
-    val activity = LocalContext.current.findActivity()
-    DisposableEffect(activity, enabled) {
-        if (enabled) {
-            activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        }
-        onDispose {
-            if (enabled) {
-                activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-            }
-        }
     }
 }
 
@@ -1370,7 +1365,7 @@ private fun VideoCallScreen(state: AppUiState, viewModel: CallViewModel) {
                 background = if (state.speakerphoneEnabled) Color(0xFF3C8DFF) else Color.White.copy(alpha = .18f),
                 icon = Icons.AutoMirrored.Filled.VolumeUp,
                 description = "Wyjście audio: ${state.audioRouteName}",
-                enabled = state.phase == CallPhase.IN_CALL && state.canSwitchAudioRoute,
+                enabled = state.phase == CallPhase.IN_CALL && state.canSwitchAudioRoute && !state.audioRouteChanging,
                 onClick = viewModel::toggleSpeaker,
             )
         }
@@ -1813,6 +1808,9 @@ private fun SettingsDialog(
                             StatusLine("Wybudzanie FCM", BuildConfig.FCM_ENABLED)
                             StatusLine("Przekaźnik TURN", BuildConfig.TURN_CREDENTIALS_URL.isNotBlank(), "automatyczny")
                             OutlinedButton(onClick = testConnection) { Text("Odśwież połączenie") }
+                            state.chatSendError?.let {
+                                Text("Czat: $it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                            }
                             state.diagnostic?.let {
                                 Text(
                                     "Ostatnia informacja: $it",
@@ -1827,7 +1825,7 @@ private fun SettingsDialog(
                         SettingsSection("O aplikacji") {
                             Text("Wideocall ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})", fontWeight = FontWeight.SemiBold)
                             Text(
-                                "Wariant: ${BuildConfig.BUILD_TYPE}\nAndroid ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})",
+                                "Wariant: ${BuildConfig.BUILD_TYPE}\nAndroid ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})\nUrządzenie: ${Build.MANUFACTURER} ${Build.MODEL}",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )

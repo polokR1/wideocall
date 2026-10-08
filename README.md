@@ -2,7 +2,7 @@
 
 Prywatny komunikator 1:1 na Androida: rozmowy wideo i audio, osobny znikający czat oraz bezpośredni transfer plików. Nie wymaga konta, numeru telefonu ani logowania Google — każda instalacja ma własny identyfikator `XXXX-XXXX`.
 
-Aktualna wersja: **0.14.2 (21)**. Raport zmian i granice weryfikacji: [NAPRAWY-0.14.2.md](NAPRAWY-0.14.2.md).
+Aktualna wersja: **0.14.3 (22)**. Raport zmian i granice weryfikacji: [NAPRAWY-0.14.3.md](NAPRAWY-0.14.3.md).
 
 ## Aktualna architektura
 

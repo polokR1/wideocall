@@ -14,10 +14,17 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 import pl.wideocall.app.notifications.CallNotifications
 import pl.wideocall.app.data.AppPreferences
 
@@ -27,6 +34,8 @@ object TelecomCallBridge {
         fun onTelecomAnswer(callId: String): Boolean
         fun onTelecomDisconnect(callId: String): Boolean
         fun onTelecomMuteChanged(callId: String, muted: Boolean)
+        fun onTelecomAudioRoutePending(callId: String, pending: Boolean) = Unit
+        fun onTelecomError(callId: String, message: String) = Unit
         fun onTelecomAudioEndpointChanged(
             callId: String,
             current: CallEndpointCompat?,
@@ -37,7 +46,7 @@ object TelecomCallBridge {
     private sealed interface Action {
         data object Answer : Action
         data object Activate : Action
-        data class ChangeEndpoint(val endpoint: CallEndpointCompat) : Action
+        data class ChangeEndpoint(val speaker: Boolean, val revision: Long) : Action
         data class Disconnect(val cause: DisconnectCause) : Action
     }
 
@@ -50,6 +59,13 @@ object TelecomCallBridge {
         var appInitiatedDisconnect: Boolean = false,
         var currentEndpoint: CallEndpointCompat? = null,
         var availableEndpoints: List<CallEndpointCompat> = emptyList(),
+        val endpointFlow: MutableStateFlow<CallEndpointCompat?> = MutableStateFlow(null),
+        val availableFlow: MutableStateFlow<List<CallEndpointCompat>> = MutableStateFlow(emptyList()),
+        var routeJob: Job? = null,
+        var routeRevision: Long = 0L,
+        var requestedSpeaker: Boolean? = null,
+        var userSelectedRoute: Boolean = false,
+        var mediaActive: Boolean = false,
     )
 
     private const val TAG = "TelecomCallBridge"
@@ -104,16 +120,17 @@ object TelecomCallBridge {
     fun toggleSpeaker(callId: String?): Boolean {
         if (callId == null) return false
         val registration = synchronized(lock) { active?.takeIf { it.callId == callId } } ?: return false
-        val current = registration.currentEndpoint
-        val target = if (current?.type == CallEndpointCompat.TYPE_SPEAKER) {
-            registration.availableEndpoints.firstOrNull { it.type == CallEndpointCompat.TYPE_BLUETOOTH }
-                ?: registration.availableEndpoints.firstOrNull { it.type == CallEndpointCompat.TYPE_WIRED_HEADSET }
-                ?: registration.availableEndpoints.firstOrNull { it.type == CallEndpointCompat.TYPE_EARPIECE }
-        } else {
-            registration.availableEndpoints.firstOrNull { it.type == CallEndpointCompat.TYPE_SPEAKER }
-        } ?: return false
-        send(callId, Action.ChangeEndpoint(target))
-        return true
+        val speaker = !(registration.requestedSpeaker ?: (registration.currentEndpoint?.type == CallEndpointCompat.TYPE_SPEAKER))
+        registration.userSelectedRoute = true
+        registration.requestedSpeaker = speaker
+        val revision = ++registration.routeRevision
+        listener?.onTelecomAudioRoutePending(callId, true)
+        val queued = send(callId, Action.ChangeEndpoint(speaker, revision))
+        if (!queued) {
+            registration.requestedSpeaker = null
+            listener?.onTelecomAudioRoutePending(callId, false)
+        }
+        return queued
     }
 
     fun disconnectLocal(callId: String?) = disconnect(callId, DisconnectCause.LOCAL)
@@ -156,6 +173,7 @@ object TelecomCallBridge {
                 manager.addCall(
                     attributes,
                     onAnswer = {
+                        registration.mediaActive = true
                         registration.timeoutJob?.cancel()
                         if (active?.callId == callId && listener?.onTelecomAnswer(callId) != true) {
                             dispatchActivityAction(registration, CallNotifications.ACTION_TELECOM_ANSWER)
@@ -177,8 +195,8 @@ object TelecomCallBridge {
                         }
                         registration.actions.close()
                     },
-                    onSetActive = { Unit },
-                    onSetInactive = { Unit },
+                    onSetActive = { registration.mediaActive = true },
+                    onSetInactive = { registration.mediaActive = false },
                 ) {
                     launch {
                         isMuted.collect { muted ->
@@ -190,19 +208,23 @@ object TelecomCallBridge {
                     launch {
                         currentCallEndpoint.collect { endpoint ->
                             registration.currentEndpoint = endpoint
+                            registration.endpointFlow.value = endpoint
                             notifyAudioEndpoints(registration)
                         }
                     }
                     launch {
                         availableEndpoints.collect { endpoints ->
                             registration.availableEndpoints = endpoints
+                            registration.availableFlow.value = endpoints
                             notifyAudioEndpoints(registration)
                         }
                     }
                     launch { processActions(registration) }
                 }
             } catch (error: Exception) {
+                if (error is CancellationException) throw error
                 Log.w(TAG, "Android Telecom rejected the call")
+                listener?.onTelecomError(callId, "Android Telecom: nie udało się utrzymać systemowej sesji rozmowy (${error.javaClass.simpleName}).")
                 applicationContext?.let {
                     AppPreferences(it).saveBackgroundIssue("Android Telecom: ${error.javaClass.simpleName}.")
                 }
@@ -222,22 +244,30 @@ object TelecomCallBridge {
     private suspend fun CallControlScope.processActions(registration: Registration) {
         for (action in registration.actions) {
             val result = when (action) {
-                Action.Answer -> answer(CallAttributesCompat.CALL_TYPE_VIDEO_CALL)
-                Action.Activate -> {
-                    val activeResult = setActive()
-                    val speakerResult = if (activeResult !is CallControlResult.Error) {
-                        registration.availableEndpoints
-                            .firstOrNull { it.type == CallEndpointCompat.TYPE_SPEAKER }
-                            ?.takeIf { registration.currentEndpoint?.type != CallEndpointCompat.TYPE_SPEAKER }
-                            ?.let { requestEndpointChange(it) }
-                    } else null
-                    speakerResult ?: activeResult
+                Action.Answer -> answer(CallAttributesCompat.CALL_TYPE_VIDEO_CALL).also {
+                    if (it !is CallControlResult.Error) registration.mediaActive = true
                 }
-                is Action.ChangeEndpoint -> requestEndpointChange(action.endpoint)
-                is Action.Disconnect -> disconnect(action.cause)
+                Action.Activate -> {
+                    // Answering already makes an incoming Telecom call active.
+                    val activeResult = if (registration.mediaActive) null else setActive()
+                    if (activeResult !is CallControlResult.Error && !registration.userSelectedRoute) {
+                        registration.mediaActive = true
+                        startAudioRouteChange(registration, speaker = true, revision = ++registration.routeRevision, automatic = true)
+                    }
+                    activeResult
+                }
+                is Action.ChangeEndpoint -> {
+                    startAudioRouteChange(registration, action.speaker, action.revision, automatic = false)
+                    null
+                }
+                is Action.Disconnect -> {
+                    registration.routeJob?.cancel()
+                    disconnect(action.cause)
+                }
             }
             if (result is CallControlResult.Error) {
                 Log.w(TAG, "Android Telecom action failed: ${result.errorCode}")
+                listener?.onTelecomError(registration.callId, "Android Telecom: operacja nie powiodła się (kod ${result.errorCode}).")
                 applicationContext?.let {
                     AppPreferences(it).saveBackgroundIssue("Android Telecom: operacja nie powiodła się (kod ${result.errorCode}).")
                 }
@@ -246,23 +276,76 @@ object TelecomCallBridge {
         }
     }
 
-    private fun send(callId: String, action: Action) {
-        val registration = synchronized(lock) { active?.takeIf { it.callId == callId } } ?: return
+    private fun CallControlScope.startAudioRouteChange(registration: Registration, speaker: Boolean, revision: Long, automatic: Boolean) {
+        registration.routeJob?.cancel()
+        registration.routeJob = scope.launch {
+            try {
+                withTimeout(8_000L) {
+                    if (automatic) {
+                        val current = registration.endpointFlow.filterNotNull().first()
+                        // Never take sound away from a connected headset, nor override a user's choice.
+                        if (registration.userSelectedRoute || !AudioRoutePolicy.preferSpeakerOnStart(current.type)) {
+                            return@withTimeout
+                        }
+                        registration.requestedSpeaker = true
+                        listener?.onTelecomAudioRoutePending(registration.callId, true)
+                    }
+                    val target = registration.availableFlow.map { endpoints ->
+                        val type = AudioRoutePolicy.targetType(speaker, endpoints.map { it.type })
+                        endpoints.firstOrNull { it.type == type }
+                    }.filterNotNull().first()
+                    if (registration.endpointFlow.value?.type == target.type) {
+                        return@withTimeout
+                    }
+                    val result = requestEndpointChange(target)
+                    if (result is CallControlResult.Error) {
+                        error("kod ${result.errorCode}")
+                    }
+                    // API success alone does not prove the actual output changed.
+                    withTimeout(3_000L) { registration.endpointFlow.filterNotNull().first { it.type == target.type } }
+                    Log.i(TAG, "audio_route_confirmed type=${target.type}")
+                }
+            } catch (error: TimeoutCancellationException) {
+                reportAudioRouteError(registration, "Android nie potwierdził zmiany wyjścia dźwięku. Spróbuj ponownie.")
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                reportAudioRouteError(registration, "Nie udało się zmienić wyjścia dźwięku (${error.message?.takeIf { it.startsWith("kod ") } ?: error.javaClass.simpleName}).")
+            } finally {
+                if (active === registration && registration.routeRevision == revision) {
+                    registration.requestedSpeaker = null
+                    listener?.onTelecomAudioRoutePending(registration.callId, false)
+                }
+            }
+        }
+    }
+
+    private fun reportAudioRouteError(registration: Registration, message: String) {
+        if (active !== registration || registration.appInitiatedDisconnect) return
+        Log.w(TAG, "audio_route_failed")
+        listener?.onTelecomError(registration.callId, "Dźwięk: $message")
+        applicationContext?.let { AppPreferences(it).saveBackgroundIssue("Dźwięk: $message") }
+    }
+
+    private fun send(callId: String, action: Action): Boolean {
+        val registration = synchronized(lock) { active?.takeIf { it.callId == callId } } ?: return false
         when (action) {
             Action.Answer,
             Action.Activate,
             is Action.ChangeEndpoint -> registration.timeoutJob?.cancel()
             is Action.Disconnect -> registration.appInitiatedDisconnect = true
         }
-        registration.actions.trySend(action)
+        return registration.actions.trySend(action).isSuccess
     }
 
     private fun clear(registration: Registration) {
         registration.timeoutJob?.cancel()
+        registration.routeJob?.cancel()
         registration.actions.close()
         synchronized(lock) {
             if (active === registration) active = null
         }
+        listener?.onTelecomAudioRoutePending(registration.callId, false)
     }
 
     private fun dispatchActivityAction(registration: Registration, action: String) {

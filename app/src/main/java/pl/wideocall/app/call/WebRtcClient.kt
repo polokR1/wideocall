@@ -104,6 +104,7 @@ class WebRtcClient(
         .createAudioDeviceModule()
     private val peerConnectionFactory: PeerConnectionFactory
     private var peerConnection: PeerConnection? = null
+    @Volatile private var sessionGeneration = 0L
     private var videoCapturer: CameraVideoCapturer? = null
     private var surfaceTextureHelper: SurfaceTextureHelper? = null
     private var videoSource: VideoSource? = null
@@ -147,6 +148,7 @@ class WebRtcClient(
         if (withMedia) startLocalMedia(videoProfile)
 
         val iceServers = buildIceServers(turnConfiguration)
+        val generation = sessionGeneration
         val configuration = PeerConnection.RTCConfiguration(iceServers).apply {
             sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
             continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
@@ -165,6 +167,7 @@ class WebRtcClient(
             object : PeerConnection.Observer {
                 override fun onSignalingChange(newState: PeerConnection.SignalingState) = Unit
                 override fun onIceConnectionChange(newState: PeerConnection.IceConnectionState) {
+                    if (generation != sessionGeneration) return
                     when (newState) {
                         PeerConnection.IceConnectionState.CONNECTED,
                         PeerConnection.IceConnectionState.COMPLETED ->
@@ -179,20 +182,23 @@ class WebRtcClient(
 
                 override fun onIceConnectionReceivingChange(receiving: Boolean) = Unit
                 override fun onIceGatheringChange(newState: PeerConnection.IceGatheringState) = Unit
-                override fun onIceCandidate(candidate: IceCandidate) = listener.onLocalIceCandidate(candidate)
+                override fun onIceCandidate(candidate: IceCandidate) {
+                    if (generation == sessionGeneration) listener.onLocalIceCandidate(candidate)
+                }
                 override fun onIceCandidatesRemoved(candidates: Array<out IceCandidate>) = Unit
                 override fun onAddStream(stream: MediaStream) = Unit
                 override fun onRemoveStream(stream: MediaStream) = Unit
                 override fun onDataChannel(channel: DataChannel) {
-                    bindDataChannel(channel)
+                    if (generation == sessionGeneration) bindDataChannel(channel)
+                    else { channel.close(); channel.dispose() }
                 }
                 override fun onRenegotiationNeeded() = Unit
                 override fun onAddTrack(receiver: RtpReceiver, mediaStreams: Array<out MediaStream>) {
-                    attachRemoteTrack(receiver.track())
+                    if (generation == sessionGeneration) attachRemoteTrack(receiver.track())
                 }
 
                 override fun onTrack(transceiver: RtpTransceiver) {
-                    attachRemoteTrack(transceiver.receiver.track())
+                    if (generation == sessionGeneration) attachRemoteTrack(transceiver.receiver.track())
                 }
             }
         ) ?: error("Nie udało się utworzyć połączenia WebRTC")
@@ -221,30 +227,33 @@ class WebRtcClient(
     }
 
     private fun createOffer(iceRestart: Boolean, onReady: (SessionDescription) -> Unit) {
+        val generation = sessionGeneration
         val constraints = offerAnswerConstraints().apply {
             if (iceRestart) mandatory += MediaConstraints.KeyValuePair("IceRestart", "true")
         }
         peerConnection?.createOffer(object : SimpleSdpObserver() {
             override fun onCreateSuccess(description: SessionDescription) {
-                setLocalDescription(description, onReady)
+                if (generation == sessionGeneration) setLocalDescription(description, onReady)
             }
 
-            override fun onCreateFailure(error: String) = listener.onError(error)
+            override fun onCreateFailure(error: String) { if (generation == sessionGeneration) listener.onError(error) }
         }, constraints)
     }
 
     fun createAnswer(onReady: (SessionDescription) -> Unit) {
+        val generation = sessionGeneration
         val constraints = offerAnswerConstraints()
         peerConnection?.createAnswer(object : SimpleSdpObserver() {
             override fun onCreateSuccess(description: SessionDescription) {
-                setLocalDescription(description, onReady)
+                if (generation == sessionGeneration) setLocalDescription(description, onReady)
             }
 
-            override fun onCreateFailure(error: String) = listener.onError(error)
+            override fun onCreateFailure(error: String) { if (generation == sessionGeneration) listener.onError(error) }
         }, constraints)
     }
 
     fun setRemoteDescription(type: String, sdp: String, onComplete: () -> Unit = {}) {
+        val generation = sessionGeneration
         val descriptionType = when (type.lowercase()) {
             "offer" -> SessionDescription.Type.OFFER
             "answer" -> SessionDescription.Type.ANSWER
@@ -252,13 +261,14 @@ class WebRtcClient(
         }
         peerConnection?.setRemoteDescription(object : SimpleSdpObserver() {
             override fun onSetSuccess() {
+                if (generation != sessionGeneration) return
                 remoteDescriptionSet = true
                 queuedRemoteCandidates.forEach { peerConnection?.addIceCandidate(it) }
                 queuedRemoteCandidates.clear()
                 onComplete()
             }
 
-            override fun onSetFailure(error: String) = listener.onError(error)
+            override fun onSetFailure(error: String) { if (generation == sessionGeneration) listener.onError(error) }
         }, SessionDescription(descriptionType, sdp))
     }
 
@@ -358,6 +368,7 @@ class WebRtcClient(
     }
 
     private fun closePeerConnection() {
+        sessionGeneration += 1
         dataChannel?.unregisterObserver()
         dataChannel?.close()
         dataChannel?.dispose()
@@ -372,6 +383,7 @@ class WebRtcClient(
     }
 
     private fun bindDataChannel(channel: DataChannel) {
+        val generation = sessionGeneration
         if (dataChannel === channel) return
         dataChannel?.unregisterObserver()
         dataChannel?.close()
@@ -381,10 +393,12 @@ class WebRtcClient(
             override fun onBufferedAmountChange(previousAmount: Long) = Unit
 
             override fun onStateChange() {
+                if (generation != sessionGeneration || dataChannel !== channel) return
                 listener.onChatReadyChanged(channel.state() == DataChannel.State.OPEN)
             }
 
             override fun onMessage(buffer: DataChannel.Buffer) {
+                if (generation != sessionGeneration || dataChannel !== channel) return
                 val source = buffer.data.slice()
                 val maxBytes = if (buffer.binary) MAX_BINARY_PAYLOAD_BYTES else MAX_CHAT_PAYLOAD_BYTES
                 if (source.remaining() !in 1..maxBytes) return
@@ -419,9 +433,10 @@ class WebRtcClient(
         description: SessionDescription,
         onReady: (SessionDescription) -> Unit,
     ) {
+        val generation = sessionGeneration
         peerConnection?.setLocalDescription(object : SimpleSdpObserver() {
-            override fun onSetSuccess() = onReady(description)
-            override fun onSetFailure(error: String) = listener.onError(error)
+            override fun onSetSuccess() { if (generation == sessionGeneration) onReady(description) }
+            override fun onSetFailure(error: String) { if (generation == sessionGeneration) listener.onError(error) }
         }, description)
     }
 

@@ -8,6 +8,7 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.SystemClock
+import android.os.Build
 import android.util.Log
 import androidx.core.telecom.CallEndpointCompat
 import androidx.core.content.ContextCompat
@@ -82,6 +83,7 @@ data class AppUiState(
     val audioRouteName: String = "Automatycznie",
     val speakerphoneEnabled: Boolean = false,
     val canSwitchAudioRoute: Boolean = false,
+    val audioRouteChanging: Boolean = false,
     val frontCamera: Boolean = true,
     val chatMessages: List<EphemeralChatMessage> = emptyList(),
     val chatReady: Boolean = false,
@@ -724,6 +726,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     }
 
     fun toggleSpeaker() {
+        if (_state.value.audioRouteChanging) return
         if (!TelecomCallBridge.toggleSpeaker(activeCallId)) {
             _state.update { it.copy(diagnostic = "Dźwięk: brak innego dostępnego wyjścia audio.") }
         }
@@ -1009,7 +1012,12 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         val json = runCatching { JSONObject(message) }.getOrNull() ?: return@onMain
         when (json.optString("type")) {
             "chat-hello", "chat-hello-ack" -> {
-                if (json.optInt("version") != 2) return@onMain
+                if (json.optInt("version") != 2) {
+                    _state.update { it.copy(chatSendError = "Drugi telefon używa niezgodnej wersji czatu. Zaktualizuj Wideocall na obu telefonach.") }
+                    Log.w("WideocallChat", "handshake_incompatible api=${Build.VERSION.SDK_INT}")
+                    return@onMain
+                }
+                Log.i("WideocallChat", "handshake_ready api=${Build.VERSION.SDK_INT}")
                 persistentChatReady = true
                 if (json.optString("type") == "chat-hello") webRtcClient.sendChatMessage(
                     JSONObject().put("type", "chat-hello-ack").put("version", 2).toString())
@@ -1054,6 +1062,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     private fun validChatMessageId(id: String): Boolean = runCatching { UUID.fromString(id).toString() == id }.getOrDefault(false)
 
     private fun chatStorageError(error: Throwable) {
+        Log.w("WideocallChat", "storage_failed api=${Build.VERSION.SDK_INT} error=${error.javaClass.simpleName}")
         _state.update { it.copy(chatSendError = "Błąd lokalnego czatu: ${error.javaClass.simpleName}. Wiadomości nie potwierdzono; nadawca może ponowić wysyłkę.") }
     }
 
@@ -1067,7 +1076,10 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 try {
                     if (!persistentChatReady) {
                         webRtcClient.sendChatMessage(JSONObject().put("type", "chat-hello").put("version", 2).toString())
-                        if (++handshakeAttempts >= 3) _state.update { it.copy(chatSendError = "Brak potwierdzenia obsługi kolejki. Zaktualizuj aplikację na obu telefonach. Wiadomości nadal czekają lokalnie.") }
+                        if (++handshakeAttempts == 3) {
+                            Log.w("WideocallChat", "handshake_timeout api=${Build.VERSION.SDK_INT}")
+                            _state.update { it.copy(chatSendError = "Brak potwierdzenia obsługi kolejki. Zaktualizuj aplikację na obu telefonach. Wiadomości nadal czekają lokalnie.") }
+                        }
                     } else {
                         val pending = localChatStore.read(peer).filter { it.pending }.take(100)
                         for (entry in pending) {
@@ -1200,6 +1212,14 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 canSwitchAudioRoute = available.map { endpoint -> endpoint.type }.distinct().size > 1,
             )
         }
+    }
+
+    override fun onTelecomAudioRoutePending(callId: String, pending: Boolean) = onMain {
+        if (activeCallId == callId) _state.update { it.copy(audioRouteChanging = pending) }
+    }
+
+    override fun onTelecomError(callId: String, message: String) = onMain {
+        if (activeCallId == callId) _state.update { it.copy(diagnostic = message, audioRouteChanging = false) }
     }
 
     private fun handleOffer(message: SignalMessage) {
@@ -1443,6 +1463,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 audioRouteName = "Automatycznie",
                 speakerphoneEnabled = false,
                 canSwitchAudioRoute = false,
+                audioRouteChanging = false,
                 frontCamera = true,
                 chatReady = false,
                 callVisible = true,
