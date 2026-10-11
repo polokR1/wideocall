@@ -507,24 +507,43 @@ private fun PermissionGate(
         )
     }
     if (showExitConfirmation) {
+        val backgroundWork = state.callId != null || state.chatSaving || state.chatMessages.any { it.pending }
         AlertDialog(
             onDismissRequest = { showExitConfirmation = false },
             title = { Text("Wyjść z Wideocall?") },
-            text = { Text(if (state.callId != null) "Aplikacja zostanie schowana. Aktywna sesja nie zostanie zakończona. Aby ją zakończyć, użyj przycisku zakończenia." else "Aplikacja zostanie zamknięta. Nadal możesz otrzymywać połączenia przez powiadomienia systemowe.") },
+            text = { Text(if (backgroundWork) "Aplikacja zostanie schowana. Sesja i kolejka wiadomości nie zostaną zakończone. Aby zakończyć czat, użyj przycisku zakończenia." else "Aplikacja zostanie zamknięta. Nadal możesz otrzymywać połączenia przez powiadomienia systemowe.") },
             confirmButton = {
                 Button(onClick = {
                     showExitConfirmation = false
                     val activity = context.findActivity()
-                    if (state.callId != null) {
+                    if (backgroundWork) {
                         if (activity?.moveTaskToBack(true) != true) Toast.makeText(context, "Nie udało się schować aplikacji. Sesja nadal trwa.", Toast.LENGTH_SHORT).show()
                     } else activity?.finish()
-                }) { Text(if (state.callId != null) "Schowaj" else "Wyjdź") }
+                }) { Text(if (backgroundWork) "Schowaj" else "Wyjdź") }
             },
             dismissButton = {
                 TextButton(onClick = { showExitConfirmation = false }) { Text("Zostań") }
             },
         )
     }
+    state.chatEndConfirmationId?.let { id ->
+        EndChatConfirmationDialog(
+            peerName = state.remoteName ?: "rozmówcą",
+            onCancel = viewModel::cancelEndChat,
+            onConfirm = { viewModel.confirmEndChat(id) },
+        )
+    }
+}
+
+@Composable
+internal fun EndChatConfirmationDialog(peerName: String, onCancel: () -> Unit, onConfirm: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = { Text("Zakończyć połączenie czatu?") },
+        text = { Text("Zakończysz połączenie z $peerName. Wysyłanie w tej sesji zostanie zatrzymane; niewysłane wiadomości zostaną w zaszyfrowanej kolejce. Okno na drugim telefonie nie zostanie zamknięte. Jeśli chcesz tylko wrócić do aplikacji, wybierz minimalizację.") },
+        confirmButton = { TextButton(onClick = onConfirm) { Text("Zakończ połączenie czatu") } },
+        dismissButton = { TextButton(onClick = onCancel) { Text("Zostaw czat aktywny") } },
+    )
 }
 
 @Composable
@@ -642,8 +661,8 @@ private fun HomeScreen(
                     )
                 }
             }
-            if (state.phase == CallPhase.IN_CHAT && !state.chatVisible) {
-                item { HiddenChatCard(state, viewModel::openChat, viewModel::hangUp) }
+            if (state.phase in setOf(CallPhase.CONNECTING_CHAT, CallPhase.IN_CHAT) && !state.chatVisible) {
+                item { HiddenChatCard(state, viewModel::openChat, viewModel::requestEndChat) }
             }
             if (state.phase in setOf(CallPhase.CONNECTING_FILE, CallPhase.IN_FILE) && !state.fileVisible) {
                 item { HiddenFileTransferCard(state, viewModel::openFileTransfer, viewModel::hangUp) }
@@ -695,7 +714,7 @@ private fun HomeScreen(
                         onCall = {
                             requestCallPermissions { viewModel.call(contact) }
                         },
-                        onChat = { viewModel.startChat(contact) },
+                        onChat = { viewModel.openContactChat(contact) },
                         onFile = {
                             fileTarget = contact
                             filePicker.launch(arrayOf("*/*"))
@@ -898,7 +917,7 @@ private fun HiddenChatCard(state: AppUiState, onOpen: () -> Unit, onEnd: () -> U
             Column(Modifier.padding(start = 10.dp).weight(1f)) {
                 Text(state.remoteName ?: state.remoteId.orEmpty(), fontWeight = FontWeight.SemiBold)
                 Text(
-                    if (state.unreadChatCount > 0) "Nowe wiadomości: ${state.unreadChatCount}" else "Szyfrowany czat działa w tle",
+                    if (state.phase == CallPhase.CONNECTING_CHAT) "Czat łączy się w tle" else "Szyfrowany czat działa w tle",
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
@@ -1171,10 +1190,14 @@ private fun ChatScreen(state: AppUiState, viewModel: CallViewModel) {
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        if (!thisPeerConnected && state.phase in setOf(CallPhase.READY, CallPhase.IN_CHAT, CallPhase.CONNECTING_CHAT)) {
-            TextButton(onClick = { state.chatPeerId?.let { viewModel.startChat(Contact(it, state.chatPeerName ?: it)) } }) {
-                Text("Połącz czat / ponów dostarczenie")
+        TextButton(onClick = viewModel::refreshChatDelivery) { Text("Sprawdź dostarczenie") }
+        if (!thisPeerConnected && state.phase == CallPhase.READY) {
+            TextButton(onClick = { state.chatPeerId?.let { viewModel.connectChat(Contact(it, state.chatPeerName ?: it)) } }) {
+                Text("Połącz z rozmówcą")
             }
+        }
+        if (state.phase in setOf(CallPhase.CONNECTING_CHAT, CallPhase.IN_CHAT)) {
+            TextButton(onClick = viewModel::requestEndChat) { Text("Zakończ połączenie czatu") }
         }
         if (state.chatMessages.any { it.pending }) {
             TextButton(onClick = viewModel::discardPendingChat) { Text("Usuń niewysłane wiadomości") }

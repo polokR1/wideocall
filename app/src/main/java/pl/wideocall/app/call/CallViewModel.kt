@@ -37,6 +37,7 @@ import pl.wideocall.app.notifications.OngoingCallService
 import pl.wideocall.app.notifications.FriendNotifications
 import pl.wideocall.app.notifications.FileTransferNotifications
 import pl.wideocall.app.notifications.DirectFileTransferService
+import pl.wideocall.app.notifications.ChatConnectionService
 import pl.wideocall.app.filetransfer.DirectFileTransferManager
 import pl.wideocall.app.filetransfer.FileTransferState
 import pl.wideocall.app.filetransfer.FileTransferStatus
@@ -93,6 +94,7 @@ data class AppUiState(
     val chatSaving: Boolean = false,
     val signalingConnected: Boolean = false,
     val chatVisible: Boolean = false,
+    val chatEndConfirmationId: String? = null,
     val safetyNumber: String? = null,
     val peerIdentityVerified: Boolean = false,
     val friendRequests: List<FriendRequest> = emptyList(),
@@ -248,6 +250,15 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     fun onAppVisible() {
         val current = _state.value
         if (current.chatVisible) current.chatPeerId?.let { refreshLocalChat(it, markOpened = true) }
+        if (!signalingConnected) {
+            // An FCM/full-screen notification may bring back an existing Activity whose
+            // socket failed while it was asleep. Do not wait for a paused retry coroutine.
+            reconnectJob?.cancel()
+            reconnectJob = null
+            _state.update { SessionStatePolicy.refreshing(it, hasActiveSession()) }
+            signalingClient.connect(_state.value.myId)
+            Log.i("WideocallSignal", "foreground_reconnect_requested activeSession=${hasActiveSession()}")
+        }
     }
 
     fun saveSettings(
@@ -419,16 +430,52 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         startOutgoingSession(contact, SignalMessage.SESSION_VIDEO)
     }
 
-    fun startChat(contact: Contact) {
-        if (activeRemoteId != contact.id) releaseChatTransport()
+    fun openContactChat(contact: Contact) {
         _state.update { it.copy(chatPeerId = contact.id, chatPeerName = contact.name, chatVisible = true, chatSendError = null,
             chatMessages = if (it.chatPeerId == contact.id) it.chatMessages else emptyList(),
             chatDraft = if (it.chatPeerId == contact.id) it.chatDraft else "") }
         refreshLocalChat(contact.id, markOpened = true)
         ChatNotifications.cancel(getApplication(), "local:${contact.id}")
+        refreshChatDelivery()
+        Log.i("WideocallChat", "window_open activeTransport=${activeCallId != null}")
+    }
+
+    fun refreshChatDelivery() {
+        val peer = _state.value.chatPeerId ?: return
+        refreshLocalChat(peer, markOpened = true)
+        if (activeRemoteId == peer && activeSessionKind != SignalMessage.SESSION_FILE && _state.value.chatReady) startChatFlush()
+    }
+
+    fun connectChat(contact: Contact) {
+        if (activeRemoteId == contact.id && activeSessionKind != SignalMessage.SESSION_FILE && activeCallId != null) {
+            refreshChatDelivery()
+            return
+        }
+        if (activeCallId != null) {
+            _state.update { it.copy(chatSendError = "Inna sesja nadal działa w tle. Jej zakończenie wymaga potwierdzenia; wiadomość pozostaje w kolejce.") }
+            return
+        }
         if (activeCallId == null && signalingConnected && _state.value.phase == CallPhase.READY) {
             startOutgoingSession(contact, SignalMessage.SESSION_CHAT)
+        } else {
+            _state.update { it.copy(chatSendError = "Brak gotowego połączenia z usługą. Wiadomości pozostają lokalnie; spróbuj po przywróceniu sieci.") }
         }
+    }
+
+    fun requestEndChat() {
+        val id = activeCallId ?: return
+        if (activeSessionKind == SignalMessage.SESSION_CHAT && _state.value.phase in setOf(CallPhase.CONNECTING_CHAT, CallPhase.IN_CHAT)) {
+            _state.update { it.copy(chatEndConfirmationId = id) }
+        }
+    }
+
+    fun cancelEndChat() = _state.update { it.copy(chatEndConfirmationId = null) }
+
+    fun confirmEndChat(expectedId: String) {
+        if (_state.value.chatEndConfirmationId == expectedId && activeCallId == expectedId && activeSessionKind == SignalMessage.SESSION_CHAT) {
+            Log.i("WideocallChat", "session_end_confirmed")
+            hangUp()
+        } else cancelEndChat()
     }
 
     fun startFileTransfer(contact: Contact, uri: Uri) {
@@ -472,6 +519,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         val fileOnly = sessionKind == SignalMessage.SESSION_FILE
         val dataOnly = chatOnly || fileOnly
         _state.update {
+            val window = ChatWindowPolicy.outgoing(it, contact, chatOnly)
             it.copy(
                 phase = when {
                     chatOnly -> CallPhase.CONNECTING_CHAT
@@ -488,12 +536,13 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 callId = callId,
                 microphoneEnabled = true,
                 frontCamera = preferences.startWithFrontCamera,
-                chatMessages = if (it.chatPeerId == contact.id) it.chatMessages else emptyList(),
-                chatDraft = if (it.chatPeerId == contact.id) it.chatDraft else "",
-                chatPeerId = contact.id,
-                chatPeerName = contact.name,
+                chatMessages = window.chatMessages,
+                chatDraft = window.chatDraft,
+                chatPeerId = window.chatPeerId,
+                chatPeerName = window.chatPeerName,
                 chatReady = false,
-                chatVisible = chatOnly,
+                // Starting a queued delivery must not reopen a window minimized while saving.
+                chatVisible = window.chatVisible,
                 fileVisible = fileOnly,
                 callVisible = true,
                 unreadChatCount = 0,
@@ -504,6 +553,10 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         }
         signalingClient.setBusy(true)
         if (!fileOnly) refreshLocalChat(contact.id, markOpened = chatOnly)
+        if (chatOnly) {
+            runCatching { ChatConnectionService.start(getApplication()) }
+                .onFailure { error -> _state.update { it.copy(diagnostic = "Czat w tle: ${error.javaClass.simpleName}.") } }
+        }
         if (!dataOnly) {
             if (!TelecomCallBridge.registerOutgoing(callId, contact.id)) {
                 _state.update { it.copy(diagnostic = "Android Telecom: system nie zarejestrował połączenia wychodzącego.") }
@@ -609,6 +662,10 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         iceRecoveryJob?.cancel()
         val chatOnly = offer.sessionKind == SignalMessage.SESSION_CHAT
         val fileOnly = offer.sessionKind == SignalMessage.SESSION_FILE
+        if (chatOnly) {
+            runCatching { ChatConnectionService.start(getApplication()) }
+                .onFailure { error -> _state.update { it.copy(diagnostic = "Czat w tle: ${error.javaClass.simpleName}.") } }
+        }
         _state.update {
             it.copy(
                 phase = when {
@@ -743,6 +800,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
 
     fun closeChatLocally() {
         _state.update { it.copy(chatVisible = false) }
+        Log.i("WideocallChat", "window_minimized activeTransport=${activeCallId != null}")
         // Minimizing is silent; only an invitation or an actual unread message warrants a notification.
         if (activeSessionKind == SignalMessage.SESSION_CHAT) ChatNotifications.cancel(getApplication(), activeCallId)
     }
@@ -792,9 +850,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
 
     fun openChat() {
         val peer = activeRemoteId ?: _state.value.chatPeerId ?: return
-        _state.update { it.copy(chatVisible = true, chatPeerId = peer,
-            chatPeerName = _state.value.contacts.firstOrNull { contact -> contact.id == peer }?.name ?: peer) }
-        refreshLocalChat(peer, markOpened = AppVisibility.isForeground)
+        openLocalChat(peer)
         ChatNotifications.cancel(getApplication(), activeCallId)
         ChatNotifications.cancel(getApplication(), "local:$peer")
         FileTransferNotifications.cancel(getApplication(), activeCallId)
@@ -808,6 +864,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
             chatDraft = if (it.chatPeerId == peer) it.chatDraft else "") }
         refreshLocalChat(peer, markOpened = true)
         ChatNotifications.cancel(getApplication(), "local:$peer")
+        refreshChatDelivery()
     }
 
     fun setChatDraft(raw: String) {
@@ -824,10 +881,13 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
             try {
                 localChatStore.add(peer, EphemeralChatMessage(UUID.randomUUID().toString(), text, true,
                     System.currentTimeMillis(), pending = true))
+                Log.i("WideocallChat", "queue_saved hidden=${!_state.value.chatVisible}")
                 _state.update { it.copy(chatDraft = if (it.chatPeerId == peer && it.chatDraft == raw) "" else it.chatDraft, chatSaving = false) }
                 refreshLocalChat(peer)
                 if (activeCallId == null && signalingConnected && _state.value.phase == CallPhase.READY) {
-                    startOutgoingSession(Contact(peer, current.chatPeerName ?: peer), SignalMessage.SESSION_CHAT)
+                    connectChat(Contact(peer, current.chatPeerName ?: peer))
+                } else if (activeRemoteId == peer && _state.value.chatReady) {
+                    startChatFlush()
                 }
             } catch (error: Exception) {
                 _state.update { it.copy(chatSaving = false, chatSendError = "Nie zapisano wiadomości: ${error.javaClass.simpleName}. Tekst zachowano.") }
@@ -1026,6 +1086,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                         localChatStore.acknowledged(peer, id, System.currentTimeMillis().takeIf {
                             _state.value.chatVisible && _state.value.chatPeerId == peer && AppVisibility.isForeground
                         })
+                        Log.i("WideocallChat", "delivery_ack hidden=${!_state.value.chatVisible}")
                         refreshLocalChat(peer)
                     } catch (error: Exception) { chatStorageError(error) }
                 }
@@ -1040,6 +1101,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                         val now = System.currentTimeMillis()
                         val visible = _state.value.chatVisible && _state.value.chatPeerId == peer && AppVisibility.isForeground
                         val added = localChatStore.add(peer, EphemeralChatMessage(id, text, false, now, now.takeIf { visible }))
+                        Log.i("WideocallChat", "message_received hidden=${!visible} duplicate=${!added}")
                         // Acknowledge only after the atomic encrypted write succeeds, including duplicate deliveries.
                         if (modern && activeCallId == session && activeRemoteId == peer) webRtcClient.sendChatMessage(
                             JSONObject().put("type", "chat-ack").put("id", id).toString())
@@ -1076,6 +1138,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                         }
                     } else {
                         val pending = localChatStore.read(peer).filter { it.pending }.take(100)
+                        if (pending.isNotEmpty()) Log.i("WideocallChat", "queue_retry count=${pending.size} hidden=${!_state.value.chatVisible}")
                         for (entry in pending) {
                             if (activeCallId != session || !_state.value.chatReady) break
                             if (!webRtcClient.sendChatMessage(JSONObject().put("type", "chat-message").put("id", entry.id).put("text", entry.text).toString())) break
@@ -1382,6 +1445,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         FileTransferNotifications.cancel(getApplication(), activeCallId)
         OngoingCallService.stop(getApplication())
         DirectFileTransferService.stop(getApplication())
+        ChatConnectionService.stop(getApplication())
         webRtcClient.endCall()
         fileTransferManager.reset(deleteCompleted = true)
         TelecomCallBridge.disconnectError(callId)
@@ -1401,6 +1465,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 callId = null,
                 chatReady = false,
                 callVisible = true,
+                chatEndConfirmationId = null,
                 safetyNumber = null,
                 peerIdentityVerified = false,
                 diagnostic = diagnostic,
@@ -1427,6 +1492,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         FileTransferNotifications.cancel(getApplication(), activeCallId)
         OngoingCallService.stop(getApplication())
         DirectFileTransferService.stop(getApplication())
+        ChatConnectionService.stop(getApplication())
         webRtcClient.endCall()
         fileTransferManager.reset(deleteCompleted = completedTransfer == null)
         when (telecomEnd) {
@@ -1460,6 +1526,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 frontCamera = true,
                 chatReady = false,
                 callVisible = true,
+                chatEndConfirmationId = null,
                 safetyNumber = null,
                 peerIdentityVerified = false,
                 fileTransfer = completedTransfer,
@@ -1663,6 +1730,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         runCatching { connectivityManager.unregisterNetworkCallback(networkCallback) }
         OngoingCallService.stop(getApplication())
         DirectFileTransferService.stop(getApplication())
+        ChatConnectionService.stop(getApplication())
         TelecomCallBridge.disconnectLocal(activeCallId)
         signalingClient.close()
         fileTransferManager.reset(deleteCompleted = true)

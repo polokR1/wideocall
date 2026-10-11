@@ -16,6 +16,7 @@ import pl.wideocall.app.notifications.CloudflarePushRegistry
 import pl.wideocall.app.security.CloudflareDeviceAuth
 import pl.wideocall.app.security.IdentityKeyManager
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 data class ContactPresence(
     val online: Boolean = false,
@@ -54,8 +55,10 @@ class SignalingClient(
     private val mainHandler = Handler(Looper.getMainLooper())
     private var authenticationTimeout: Runnable? = null
     private var startedAt = 0L
+    private val disposed = AtomicBoolean(false)
 
     @Synchronized fun connect(userId: String, force: Boolean = false) {
+        if (disposed.get()) return
         if (!ConnectionAttemptPolicy.shouldStart(userId, this.userId, connecting, ready, force)) return
         disconnect()
         this.userId = userId
@@ -156,9 +159,17 @@ class SignalingClient(
     }
 
     fun close() {
+        if (!disposed.compareAndSet(false, true)) return
         disconnect()
-        httpClient.dispatcher.executorService.shutdown()
-        httpClient.connectionPool.evictAll()
+        // Evicting pooled TLS sockets can perform network I/O on older Androids.
+        // ViewModel.onCleared runs on the main thread and its scope is already cancelled.
+        Thread({
+            try {
+                httpClient.connectionPool.evictAll()
+            } finally {
+                httpClient.dispatcher.executorService.shutdown()
+            }
+        }, "WideocallSignalCleanup").apply { isDaemon = true }.start()
     }
 
     private fun handlePacket(webSocket: WebSocket, raw: String) {

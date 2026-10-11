@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import pl.wideocall.app.MainActivity
 import pl.wideocall.app.R
@@ -98,7 +99,10 @@ object ChatNotifications {
             .setOngoing(false)
             .setOnlyAlertOnce(true)
         timeoutMs?.let(builder::setTimeoutAfter)
-        context.getSystemService(NotificationManager::class.java).notify(notificationId(sessionId), builder.build())
+        val manager = context.getSystemService(NotificationManager::class.java)
+        manager.notify(notificationId(sessionId), builder.build())
+        // Requesting a notification is not proof that the OS displayed a banner or played sound.
+        Log.i("WideocallChat", "notification_requested message=${peerId != null} enabled=${manager.areNotificationsEnabled()} channelImportance=${manager.getNotificationChannel(CHANNEL_ID)?.importance}")
     }
 
     private fun notificationId(sessionId: String): Int =

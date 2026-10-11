@@ -5,6 +5,7 @@ import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createComposeRule
 import org.junit.Rule
 import org.junit.Test
+import org.junit.Assert.*
 import pl.wideocall.app.call.AppUiState
 import pl.wideocall.app.call.CallPhase
 import pl.wideocall.app.call.EphemeralChatMessage
@@ -12,6 +13,21 @@ import pl.wideocall.app.ui.theme.WideocallTheme
 
 class ChatSecurityUiTest {
     @get:Rule val compose = createComposeRule()
+
+    @Test fun endingChatRequiresExplicitConfirmationAndCanBeCancelled() {
+        var ended = false
+        var cancelled = false
+        compose.setContent { WideocallTheme {
+            EndChatConfirmationDialog("Test", onCancel = { cancelled = true }, onConfirm = { ended = true })
+        } }
+        compose.onNodeWithText("Zakończyć połączenie czatu?").assertIsDisplayed()
+        assertFalse(ended)
+        compose.onNodeWithText("Zostaw czat aktywny").performClick()
+        assertTrue(cancelled)
+        assertFalse(ended)
+        compose.onNodeWithText("Zakończ połączenie czatu").performClick()
+        assertTrue(ended)
+    }
 
     @Test fun deliveryStatusDoesNotClaimMessageWasRead() {
         val state = AppUiState("ABCD-EF23", "Test", emptyList(), chatMessages = listOf(
