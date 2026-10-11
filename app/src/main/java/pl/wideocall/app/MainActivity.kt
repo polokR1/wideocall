@@ -21,6 +21,8 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import pl.wideocall.app.call.CallScreenAwakePolicy
 import pl.wideocall.app.call.CallScreenController
 import androidx.core.net.toUri
@@ -60,6 +62,7 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.Lock
@@ -77,6 +80,8 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
@@ -126,7 +131,7 @@ import pl.wideocall.app.call.TelecomCallBridge
 import pl.wideocall.app.data.AppPreferences
 import pl.wideocall.app.data.Contact
 import pl.wideocall.app.data.FriendRequest
-import pl.wideocall.app.data.RecentCaller
+import pl.wideocall.app.data.ContactNamePolicy
 import pl.wideocall.app.data.SentFriendRequest
 import pl.wideocall.app.data.VideoQualityMode
 import pl.wideocall.app.notifications.CallNotifications
@@ -257,30 +262,58 @@ private fun PermissionGate(
     var permissionsGranted by remember { mutableStateOf(hasMediaPermissions(context)) }
     var notificationGranted by remember { mutableStateOf(hasNotificationPermission(context)) }
     var pendingMediaAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+    var showMediaExplanation by remember { mutableStateOf(false) }
+    var mediaDenied by remember { mutableStateOf(false) }
     val mediaLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) { results ->
-        permissionsGranted = results[Manifest.permission.CAMERA] == true &&
-            results[Manifest.permission.RECORD_AUDIO] == true
+    ) { _ ->
+        permissionsGranted = hasMediaPermissions(context)
         val pending = pendingMediaAction
         pendingMediaAction = null
         if (permissionsGranted) pending?.invoke()
+        else mediaDenied = true
     }
     val notificationLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { notificationGranted = hasNotificationPermission(context) }
-    val requestMediaPermissions: () -> Unit = {
-        pendingMediaAction = null
-        mediaLauncher.launch(requiredMediaPermissions())
-    }
     val requestMediaPermissionsAndThen: (() -> Unit) -> Unit = { action ->
         if (hasMediaPermissions(context)) {
             permissionsGranted = true
             action()
         } else {
             pendingMediaAction = action
-            mediaLauncher.launch(requiredMediaPermissions())
+            showMediaExplanation = true
         }
+    }
+    val permissionLifecycle = (context.findActivity() as? ComponentActivity)?.lifecycle
+    DisposableEffect(permissionLifecycle) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                permissionsGranted = hasMediaPermissions(context)
+                notificationGranted = hasNotificationPermission(context)
+            }
+        }
+        permissionLifecycle?.addObserver(observer)
+        onDispose { permissionLifecycle?.removeObserver(observer) }
+    }
+
+    if (showMediaExplanation) {
+        MediaPermissionExplanation(
+            onDismiss = { showMediaExplanation = false; pendingMediaAction = null },
+            onContinue = { showMediaExplanation = false; mediaLauncher.launch(requiredMediaPermissions()) },
+        )
+    }
+    if (mediaDenied) {
+        AlertDialog(
+            onDismissRequest = { mediaDenied = false },
+            title = { Text("Rozmowa nie została uruchomiona") },
+            text = { Text("Nie udzielono dostępu do kamery i mikrofonu. Czat i pliki nadal działają bez tych zgód. Jeśli Android nie pyta ponownie, dostęp można włączyć w ustawieniach aplikacji.") },
+            confirmButton = { TextButton(onClick = { mediaDenied = false }) { Text("Rozumiem") } },
+            dismissButton = { TextButton(onClick = {
+                mediaDenied = false
+                context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, "package:${context.packageName}".toUri()))
+            }) { Text("Ustawienia aplikacji") } },
+        )
     }
 
     LaunchedEffect(Unit) {
@@ -311,13 +344,13 @@ private fun PermissionGate(
             CallNotifications.ACTION_ANSWER -> if (state.phase == CallPhase.INCOMING) {
                 consumeNotificationAction()
                 requestMediaPermissionsAndThen {
-                    viewModel.acceptIncomingCall()
+                    if (viewModel.state.value.callId == action.callId) viewModel.acceptIncomingCall()
                 }
             }
             CallNotifications.ACTION_TELECOM_ANSWER -> if (state.phase == CallPhase.INCOMING) {
                 consumeNotificationAction()
                 requestMediaPermissionsAndThen {
-                    viewModel.acceptIncomingCallFromTelecom()
+                    if (viewModel.state.value.callId == action.callId) viewModel.acceptIncomingCallFromTelecom()
                 }
             }
             CallNotifications.ACTION_DECLINE -> if (state.phase == CallPhase.INCOMING) {
@@ -370,7 +403,9 @@ private fun PermissionGate(
     } else when (state.phase) {
         CallPhase.INCOMING -> if (state.callVisible) {
             IncomingCallScreen(state, viewModel, permissionsGranted) {
-                requestMediaPermissionsAndThen(viewModel::acceptIncomingCall)
+                requestMediaPermissionsAndThen {
+                    if (viewModel.state.value.callId == state.callId) viewModel.acceptIncomingCall()
+                }
             }
         } else HomeScreen(
             state = state,
@@ -379,7 +414,6 @@ private fun PermissionGate(
             notificationGranted = notificationGranted,
             fullScreenIntentAllowed = fullScreenIntentAllowed,
             requestFullScreenIntent = requestFullScreenIntent,
-            requestPermissions = requestMediaPermissions,
             requestCallPermissions = requestMediaPermissionsAndThen,
             requestNotifications = {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -396,7 +430,6 @@ private fun PermissionGate(
             notificationGranted = notificationGranted,
             fullScreenIntentAllowed = fullScreenIntentAllowed,
             requestFullScreenIntent = requestFullScreenIntent,
-            requestPermissions = requestMediaPermissions,
             requestCallPermissions = requestMediaPermissionsAndThen,
             requestNotifications = {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -411,7 +444,6 @@ private fun PermissionGate(
             notificationGranted = notificationGranted,
             fullScreenIntentAllowed = fullScreenIntentAllowed,
             requestFullScreenIntent = requestFullScreenIntent,
-            requestPermissions = requestMediaPermissions,
             requestCallPermissions = requestMediaPermissionsAndThen,
             requestNotifications = {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -426,7 +458,6 @@ private fun PermissionGate(
             notificationGranted = notificationGranted,
             fullScreenIntentAllowed = fullScreenIntentAllowed,
             requestFullScreenIntent = requestFullScreenIntent,
-            requestPermissions = requestMediaPermissions,
             requestCallPermissions = requestMediaPermissionsAndThen,
             requestNotifications = {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -442,7 +473,6 @@ private fun PermissionGate(
             notificationGranted = notificationGranted,
             fullScreenIntentAllowed = fullScreenIntentAllowed,
             requestFullScreenIntent = requestFullScreenIntent,
-            requestPermissions = requestMediaPermissions,
             requestCallPermissions = requestMediaPermissionsAndThen,
             requestNotifications = {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -457,7 +487,6 @@ private fun PermissionGate(
             notificationGranted = notificationGranted,
             fullScreenIntentAllowed = fullScreenIntentAllowed,
             requestFullScreenIntent = requestFullScreenIntent,
-            requestPermissions = requestMediaPermissions,
             requestCallPermissions = requestMediaPermissionsAndThen,
             requestNotifications = {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -528,16 +557,15 @@ private fun HomeScreen(
     notificationGranted: Boolean,
     fullScreenIntentAllowed: Boolean,
     requestFullScreenIntent: () -> Unit,
-    requestPermissions: () -> Unit,
     requestCallPermissions: (() -> Unit) -> Unit,
     requestNotifications: () -> Unit,
 ) {
     val context = LocalContext.current
     var showAddContact by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
+    var contactToEdit by remember { mutableStateOf<Contact?>(null) }
     var requestToCancel by remember { mutableStateOf<SentFriendRequest?>(null) }
     var fileTarget by remember { mutableStateOf<Contact?>(null) }
-    var callerToSave by remember { mutableStateOf<RecentCaller?>(null) }
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         val target = fileTarget
         fileTarget = null
@@ -633,11 +661,6 @@ private fun HomeScreen(
                     Toast.makeText(context, "ID skopiowane", Toast.LENGTH_SHORT).show()
                 }
             }
-            if (!permissionsGranted) {
-                item {
-                    PermissionCard(requestPermissions)
-                }
-            }
             if (state.sentFriendRequests.isNotEmpty()) {
                 item {
                     Text(
@@ -649,23 +672,6 @@ private fun HomeScreen(
                 }
                 items(state.sentFriendRequests, key = { it.requestId }) { request ->
                     SentFriendRequestCard(request = request, onCancel = { requestToCancel = request })
-                }
-            }
-            val unsavedCallers = state.recentCallers.filter { recent -> state.contacts.none { it.id == recent.id } }
-            if (unsavedCallers.isNotEmpty()) {
-                item {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            "Ostatni rozmówcy",
-                            modifier = Modifier.padding(top = 8.dp, bottom = 2.dp).weight(1f),
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.SemiBold,
-                        )
-                        TextButton(onClick = viewModel::clearRecentCallers) { Text("Wyczyść") }
-                    }
-                }
-                items(unsavedCallers, key = { it.id }) { caller ->
-                    RecentCallerCard(caller, onSave = { callerToSave = caller })
                 }
             }
             item {
@@ -683,9 +689,9 @@ private fun HomeScreen(
                     ContactCard(
                         contact = contact,
                         presence = state.contactPresence[contact.id],
-                        callEnabled = state.phase == CallPhase.READY,
-                        chatEnabled = state.phase in setOf(CallPhase.READY, CallPhase.SERVER_ERROR, CallPhase.CONNECTING_SERVER),
-                        fileEnabled = state.phase == CallPhase.READY,
+                        callEnabled = state.phase == CallPhase.READY || (state.signalingConnected && state.phase in setOf(CallPhase.CONNECTING_CHAT, CallPhase.IN_CHAT)),
+                        chatEnabled = true,
+                        fileEnabled = state.phase == CallPhase.READY || (state.signalingConnected && state.phase in setOf(CallPhase.CONNECTING_CHAT, CallPhase.IN_CHAT)),
                         onCall = {
                             requestCallPermissions { viewModel.call(contact) }
                         },
@@ -695,6 +701,7 @@ private fun HomeScreen(
                             filePicker.launch(arrayOf("*/*"))
                         },
                         onDelete = { viewModel.removeContact(contact.id) },
+                        onEdit = { contactToEdit = contact },
                     )
                 }
             }
@@ -716,7 +723,6 @@ private fun HomeScreen(
             mediaPermissionsGranted = permissionsGranted,
             notificationPermissionGranted = notificationGranted,
             fullScreenIntentAllowed = fullScreenIntentAllowed,
-            requestMediaPermissions = requestPermissions,
             requestNotificationPermission = requestNotifications,
             requestFullScreenIntent = requestFullScreenIntent,
             testConnection = viewModel::connect,
@@ -726,6 +732,11 @@ private fun HomeScreen(
                 showSettings = false
             },
         )
+    }
+    contactToEdit?.let { contact ->
+        EditContactNameDialog(contact, onDismiss = { contactToEdit = null }, onSave = { name ->
+            viewModel.renameContact(contact.id, name).also { if (it.isSuccess) contactToEdit = null }
+        })
     }
     requestToCancel?.let { request ->
         AlertDialog(
@@ -740,16 +751,6 @@ private fun HomeScreen(
             },
             dismissButton = {
                 TextButton(onClick = { requestToCancel = null }) { Text("Anuluj") }
-            },
-        )
-    }
-    callerToSave?.let { caller ->
-        SaveCallerDialog(
-            caller = caller,
-            onDismiss = { callerToSave = null },
-            onSave = { name ->
-                viewModel.saveRecentCaller(caller.id, name)
-                callerToSave = null
             },
         )
     }
@@ -818,14 +819,38 @@ private fun MyIdCard(myId: String, onCopy: () -> Unit) {
 }
 
 @Composable
-private fun PermissionCard(onRequest: () -> Unit) {
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
-        Column(Modifier.fillMaxWidth().padding(16.dp)) {
-            Text("Potrzebny dostęp do kamery i mikrofonu", fontWeight = FontWeight.SemiBold)
-            Text("Bez tych uprawnień rozmowa wideo nie może się rozpocząć.", style = MaterialTheme.typography.bodySmall)
-            TextButton(onClick = onRequest, modifier = Modifier.align(Alignment.End)) { Text("Nadaj dostęp") }
-        }
-    }
+internal fun MediaPermissionExplanation(onDismiss: () -> Unit, onContinue: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Kamera i mikrofon podczas rozmowy") },
+        text = { Text("Kamera przesyła obraz, a mikrofon Twój głos na żywo do rozmówcy. Wideocall nie zapisuje nagrania rozmowy. Android może nazwać tę zgodę „nagrywaniem” — jest ona potrzebna także do transmisji na żywo. Kamera i mikrofon nie są używane przez czat ani transfer plików. W oknie systemowym możesz wybrać „Podczas używania aplikacji” lub dostęp jednorazowy, jeśli telefon oferuje te opcje.") },
+        confirmButton = { Button(onClick = onContinue) { Text("Przejdź do zgody Androida") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Nie teraz") } },
+    )
+}
+
+@Composable
+internal fun EditContactNameDialog(contact: Contact, onDismiss: () -> Unit, onSave: (String) -> Result<Unit>) {
+    var name by remember(contact.id) { mutableStateOf(contact.name) }
+    var error by remember { mutableStateOf<String?>(null) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Zmień nazwę urządzenia") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("${contact.id} • nazwa tylko na tym telefonie")
+                OutlinedTextField(value = name, onValueChange = { name = it; error = null },
+                    label = { Text("Nazwa urządzenia") }, singleLine = true, isError = error != null)
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            }
+        },
+        confirmButton = { Button(onClick = {
+            val valid = ContactNamePolicy.validate(name)
+            error = valid.exceptionOrNull()?.message
+            if (valid.isSuccess) error = onSave(valid.getOrThrow()).exceptionOrNull()?.message
+        }) { Text("Zapisz nazwę") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Anuluj") } },
+    )
 }
 
 @Composable
@@ -944,45 +969,6 @@ private fun IncomingDataInvitationCard(
 }
 
 @Composable
-private fun RecentCallerCard(caller: RecentCaller, onSave: () -> Unit) {
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Icon(Icons.Default.Call, null, tint = MaterialTheme.colorScheme.primary)
-            Column(Modifier.padding(start = 12.dp).weight(1f)) {
-                Text(caller.id, fontWeight = FontWeight.SemiBold, letterSpacing = 1.sp)
-                Text("Dzwonił ${relativeLastSeen(caller.lastCallAt)}", style = MaterialTheme.typography.bodySmall)
-            }
-            Button(onClick = onSave) { Text("Zapisz") }
-        }
-    }
-}
-
-@Composable
-private fun SaveCallerDialog(caller: RecentCaller, onDismiss: () -> Unit, onSave: (String) -> Unit) {
-    var name by remember(caller.id) { mutableStateOf("") }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Zapisz rozmówcę") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(caller.id)
-                OutlinedTextField(
-                    value = name,
-                    onValueChange = { name = it.take(80) },
-                    label = { Text("Nazwa kontaktu") },
-                    singleLine = true,
-                )
-            }
-        },
-        confirmButton = { Button(onClick = { onSave(name) }) { Text("Zapisz") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Anuluj") } },
-    )
-}
-
-@Composable
 private fun HiddenCallCard(state: AppUiState, onOpen: () -> Unit, onEnd: () -> Unit) {
     val title = when (state.phase) {
         CallPhase.INCOMING -> "Połączenie przychodzące"
@@ -1059,7 +1045,9 @@ private fun ContactCard(
     onChat: () -> Unit,
     onFile: () -> Unit,
     onDelete: () -> Unit,
+    onEdit: () -> Unit,
 ) {
+    var showMenu by remember { mutableStateOf(false) }
     val presenceColor = when {
         presence?.busy == true -> Color(0xFFFF6B6B)
         presence?.online == true -> Color(0xFF3DDC97)
@@ -1100,7 +1088,13 @@ private fun ContactCard(
                     )
                 }
             }
-            IconButton(onClick = onDelete) { Icon(Icons.Default.DeleteOutline, "Usuń kontakt", tint = MaterialTheme.colorScheme.onSurfaceVariant) }
+            Box {
+                IconButton(onClick = { showMenu = true }) { Icon(Icons.Default.MoreVert, "Opcje kontaktu") }
+                DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+                    DropdownMenuItem(text = { Text("Zmień nazwę") }, onClick = { showMenu = false; onEdit() })
+                    DropdownMenuItem(text = { Text("Usuń kontakt") }, onClick = { showMenu = false; onDelete() })
+                }
+            }
             IconButton(onClick = onFile, enabled = fileEnabled) {
                 Icon(
                     Icons.Default.AttachFile,
@@ -1124,6 +1118,7 @@ private fun ContactCard(
 
 @Composable
 private fun ChatScreen(state: AppUiState, viewModel: CallViewModel) {
+    val thisPeerConnected = state.chatReady && state.chatPeerId == state.remoteId && state.phase != CallPhase.IN_FILE
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -1147,7 +1142,7 @@ private fun ChatScreen(state: AppUiState, viewModel: CallViewModel) {
                     fontWeight = FontWeight.Bold,
                 )
                 Text(
-                    if (state.chatReady) "Połączenie szyfrowane • ${state.status}" else "Skrzynka lokalna • ${state.status}",
+                    if (thisPeerConnected) "Połączenie szyfrowane" else "Skrzynka lokalna • wiadomości czekają na połączenie",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -1157,7 +1152,9 @@ private fun ChatScreen(state: AppUiState, viewModel: CallViewModel) {
             }
         }
         Spacer(Modifier.height(12.dp))
-        SecurityStatusIcon(state, onVerify = { viewModel.markCurrentPeerVerified(state.callId, state.safetyNumber.orEmpty()) })
+        if (state.chatPeerId == state.remoteId) {
+            SecurityStatusIcon(state, onVerify = { viewModel.markCurrentPeerVerified(state.callId, state.safetyNumber.orEmpty()) })
+        }
         Spacer(Modifier.height(12.dp))
         EphemeralChatPanel(
             state = state,
@@ -1170,11 +1167,11 @@ private fun ChatScreen(state: AppUiState, viewModel: CallViewModel) {
         )
         Spacer(Modifier.height(12.dp))
         Text(
-            "Treść jest zaszyfrowana lokalnie, nie na serwerze. Minuta od otwarcia na tym telefonie; wysłane — po potwierdzeniu odbioru. Niewysłane czekają na bezpośrednie połączenie.",
+            "Minuta od otwarcia na tym telefonie; u odbiorcy samo powiadomienie nie uruchamia licznika. „Dostarczono” nie oznacza przeczytania. Treść jest zaszyfrowana lokalnie; niewysłane czekają na bezpośrednie połączenie.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        if (!state.chatReady && state.phase == CallPhase.READY) {
+        if (!thisPeerConnected && state.phase in setOf(CallPhase.READY, CallPhase.IN_CHAT, CallPhase.CONNECTING_CHAT)) {
             TextButton(onClick = { state.chatPeerId?.let { viewModel.startChat(Contact(it, state.chatPeerName ?: it)) } }) {
                 Text("Połącz czat / ponów dostarczenie")
             }
@@ -1297,7 +1294,7 @@ private fun IncomingCallScreen(
         Row(horizontalArrangement = Arrangement.spacedBy(52.dp)) {
             RoundCallButton(Color(0xFFE84C4F), Icons.Default.CallEnd, "Odrzuć", viewModel::rejectIncomingCall)
             RoundCallButton(Color(0xFF39C27F), Icons.Default.Call, "Odbierz") {
-                if (permissionsGranted) viewModel.acceptIncomingCall() else requestPermissions()
+                requestPermissions()
             }
         }
     }
@@ -1453,7 +1450,7 @@ internal fun EphemeralChatPanel(
                     style = MaterialTheme.typography.labelMedium,
                 )
                 IconButton(onClick = onClose, modifier = Modifier.size(34.dp)) {
-                    Icon(Icons.Default.Close, "Zamknij czat", tint = Color.White)
+                    Icon(Icons.Default.KeyboardArrowDown, "Schowaj czat", tint = Color.White)
                 }
             }
             val messagesModifier = if (expanded) {
@@ -1477,7 +1474,7 @@ internal fun EphemeralChatPanel(
                         ) {
                             Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
                                 Text(message.text, color = Color.White, style = MaterialTheme.typography.bodyMedium)
-                                if (message.mine) Text(if (message.pending) "Czeka na dostarczenie" else "Odbiór potwierdzony",
+                                if (message.mine) Text(if (message.pending) "Czeka na dostarczenie" else "Dostarczono na telefon",
                                     color = Color(0xFFCEDFF6), style = MaterialTheme.typography.labelSmall)
                             }
                         }
@@ -1618,7 +1615,6 @@ private fun SettingsDialog(
     mediaPermissionsGranted: Boolean,
     notificationPermissionGranted: Boolean,
     fullScreenIntentAllowed: Boolean,
-    requestMediaPermissions: () -> Unit,
     requestNotificationPermission: () -> Unit,
     requestFullScreenIntent: () -> Unit,
     testConnection: () -> Unit,
@@ -1736,7 +1732,7 @@ private fun SettingsDialog(
                                 Switch(checked = frontCamera, onCheckedChange = { frontCamera = it })
                             }
                             Text(
-                                "Głośnik nie wymaga osobnego uprawnienia. Głośnik, słuchawki i Bluetooth są przełączane przez system Android podczas rozmowy.",
+                                "Głośnik nie wymaga osobnego uprawnienia. Wyjścia audio przełącza system Android. Aplikacja nie prosi o lokalizację ani dostęp do urządzeń w pobliżu.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -1745,10 +1741,8 @@ private fun SettingsDialog(
 
                     item {
                         SettingsSection("Gotowość telefonu") {
-                            StatusLine("Kamera i mikrofon", mediaPermissionsGranted)
-                            if (!mediaPermissionsGranted) {
-                                TextButton(onClick = requestMediaPermissions) { Text("Nadaj uprawnienia") }
-                            }
+                            StatusLine("Kamera i mikrofon do rozmów na żywo", mediaPermissionsGranted)
+                            Text("O zgodę poprosimy dopiero przy dzwonieniu lub odbieraniu. Rozmowy nie są zapisywane jako nagrania.", style = MaterialTheme.typography.bodySmall)
                             StatusLine("Powiadomienia", notificationPermissionGranted)
                             if (!notificationPermissionGranted && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                                 TextButton(onClick = requestNotificationPermission) { Text("Włącz powiadomienia") }
@@ -1908,7 +1902,6 @@ private fun hasMediaPermissions(context: Context): Boolean =
 private fun requiredMediaPermissions(): Array<String> = buildList {
     add(Manifest.permission.CAMERA)
     add(Manifest.permission.RECORD_AUDIO)
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) add(Manifest.permission.BLUETOOTH_CONNECT)
 }.toTypedArray()
 
 private fun hasNotificationPermission(context: Context): Boolean =

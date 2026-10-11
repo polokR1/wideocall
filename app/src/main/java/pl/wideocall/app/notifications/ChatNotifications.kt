@@ -51,21 +51,18 @@ object ChatNotifications {
         )
     }
 
-    fun showActive(context: Context, callerId: String, sessionId: String?) {
-        if (sessionId == null) return
-        show(
-            context = context,
-            title = "Szyfrowany czat jest zminimalizowany",
-            text = "$callerId • dotknij, aby wrócić",
-            sessionId = sessionId,
-            timeoutMs = null,
-            ongoing = true,
-        )
-    }
-
     fun cancel(context: Context, sessionId: String?) {
         if (sessionId == null) return
         context.getSystemService(NotificationManager::class.java).cancel(notificationId(sessionId))
+    }
+
+    fun removeLegacyMinimizedNotifications(context: Context) {
+        val manager = context.getSystemService(NotificationManager::class.java)
+        manager.activeNotifications.filter {
+            it.notification.channelId == CHANNEL_ID &&
+                it.notification.flags and Notification.FLAG_ONGOING_EVENT != 0 &&
+                it.notification.extras.getString(Notification.EXTRA_TITLE) == "Szyfrowany czat jest zminimalizowany"
+        }.forEach { manager.cancel(it.tag, it.id) }
     }
 
     private fun show(
@@ -74,7 +71,6 @@ object ChatNotifications {
         text: String,
         sessionId: String,
         timeoutMs: Long?,
-        ongoing: Boolean = false,
         peerId: String? = null,
     ) {
         createChannel(context)
@@ -98,8 +94,9 @@ object ChatNotifications {
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setVisibility(NotificationCompat.VISIBILITY_SECRET)
-            .setAutoCancel(!ongoing)
-            .setOngoing(ongoing)
+            .setAutoCancel(true)
+            .setOngoing(false)
+            .setOnlyAlertOnce(true)
         timeoutMs?.let(builder::setTimeoutAfter)
         context.getSystemService(NotificationManager::class.java).notify(notificationId(sessionId), builder.build())
     }

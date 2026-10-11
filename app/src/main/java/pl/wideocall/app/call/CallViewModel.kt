@@ -28,7 +28,6 @@ import org.json.JSONObject
 import pl.wideocall.app.data.AppPreferences
 import pl.wideocall.app.data.Contact
 import pl.wideocall.app.data.FriendRequest
-import pl.wideocall.app.data.RecentCaller
 import pl.wideocall.app.data.SentFriendRequest
 import pl.wideocall.app.data.VideoQualityMode
 import pl.wideocall.app.notifications.CallNotifications
@@ -98,7 +97,6 @@ data class AppUiState(
     val peerIdentityVerified: Boolean = false,
     val friendRequests: List<FriendRequest> = emptyList(),
     val sentFriendRequests: List<SentFriendRequest> = emptyList(),
-    val recentCallers: List<RecentCaller> = emptyList(),
     val callVisible: Boolean = true,
     val unreadChatCount: Int = 0,
     val diagnostic: String? = null,
@@ -137,7 +135,6 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
             contacts = preferences.contacts(),
             friendRequests = preferences.friendRequests(),
             sentFriendRequests = preferences.sentFriendRequests(),
-            recentCallers = preferences.recentCallers(),
             watchEnabled = preferences.watchEnabled,
             videoQualityMode = preferences.videoQualityMode,
             startWithFrontCamera = preferences.startWithFrontCamera,
@@ -243,14 +240,14 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 startWithFrontCamera = preferences.startWithFrontCamera,
                 friendRequests = preferences.friendRequests(),
                 sentFriendRequests = preferences.sentFriendRequests(),
-                recentCallers = preferences.recentCallers(),
                 diagnostic = backgroundIssue ?: it.diagnostic,
             )
         }
     }
 
     fun onAppVisible() {
-        if (_state.value.chatVisible) openChat()
+        val current = _state.value
+        if (current.chatVisible) current.chatPeerId?.let { refreshLocalChat(it, markOpened = true) }
     }
 
     fun saveSettings(
@@ -281,21 +278,6 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         preferences.saveContact(Contact(normalizedId, name))
         _state.update { it.copy(contacts = preferences.contacts()) }
         signalingClient.observeContacts(_state.value.contacts.map(Contact::id))
-    }
-
-    fun saveRecentCaller(id: String, name: String) {
-        val normalized = AppPreferences.normalizeId(id)
-        if (normalized.length != 9) {
-            _state.update { it.copy(diagnostic = "Historia połączeń: nieprawidłowy identyfikator rozmówcy.") }
-            return
-        }
-        addContact(name.trim().ifBlank { normalized }, normalized)
-        _state.update { it.copy(status = "Zapisano kontakt", diagnostic = null) }
-    }
-
-    fun clearRecentCallers() {
-        preferences.clearRecentCallers()
-        _state.update { it.copy(recentCallers = emptyList()) }
     }
 
     fun sendFriendRequest(id: String) {
@@ -413,6 +395,14 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         _state.update { it.copy(friendRequests = preferences.friendRequests(), status = "Zaproszenie odrzucone", diagnostic = null) }
     }
 
+    fun renameContact(id: String, name: String): Result<Unit> = preferences.renameContact(id, name).map { renamed ->
+        _state.update { current -> current.copy(
+            contacts = preferences.contacts(),
+            chatPeerName = if (current.chatPeerId == renamed.id) renamed.name else current.chatPeerName,
+            remoteName = if (current.remoteId == renamed.id) renamed.name else current.remoteName,
+        ) }
+    }
+
     fun removeContact(id: String) {
         preferences.removeContact(id)
         _state.update { current ->
@@ -425,24 +415,24 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     }
 
     fun call(contact: Contact) {
+        releaseChatTransport()
         startOutgoingSession(contact, SignalMessage.SESSION_VIDEO)
     }
 
     fun startChat(contact: Contact) {
-        if (activeCallId != null && (activeRemoteId != contact.id || activeSessionKind == SignalMessage.SESSION_FILE)) {
-            _state.update { it.copy(diagnostic = "Zakończ bieżącą sesję przed otwarciem innego czatu.") }
-            return
-        }
+        if (activeRemoteId != contact.id) releaseChatTransport()
         _state.update { it.copy(chatPeerId = contact.id, chatPeerName = contact.name, chatVisible = true, chatSendError = null,
             chatMessages = if (it.chatPeerId == contact.id) it.chatMessages else emptyList(),
             chatDraft = if (it.chatPeerId == contact.id) it.chatDraft else "") }
         refreshLocalChat(contact.id, markOpened = true)
+        ChatNotifications.cancel(getApplication(), "local:${contact.id}")
         if (activeCallId == null && signalingConnected && _state.value.phase == CallPhase.READY) {
             startOutgoingSession(contact, SignalMessage.SESSION_CHAT)
         }
     }
 
     fun startFileTransfer(contact: Contact, uri: Uri) {
+        releaseChatTransport()
         if (_state.value.phase != CallPhase.READY) {
             _state.update { it.copy(diagnostic = "Transfer: aplikacja nie jest teraz gotowa do nowej sesji.") }
             return
@@ -458,6 +448,12 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
             return
         }
         startOutgoingSession(contact, SignalMessage.SESSION_FILE)
+    }
+
+    private fun releaseChatTransport() {
+        // Only a data-only session is replaceable. Local messages and the peer's window are retained.
+        if (activeSessionKind == SignalMessage.SESSION_CHAT && activeCallId != null &&
+            _state.value.phase in setOf(CallPhase.CONNECTING_CHAT, CallPhase.IN_CHAT)) hangUp()
     }
 
     private fun startOutgoingSession(contact: Contact, sessionKind: String) {
@@ -545,14 +541,18 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     }
 
     fun acceptIncomingCall() {
-        val offer = pendingOffer ?: return
+        val offer = pendingOffer?.takeIf {
+            _state.value.phase == CallPhase.INCOMING && it.sessionKind == SignalMessage.SESSION_VIDEO
+        } ?: return
         notifyCallAccepted(offer)
         TelecomCallBridge.answer(offer.callId ?: return)
         acceptOffer(offer, withMedia = true)
     }
 
     fun acceptIncomingCallFromTelecom() {
-        val offer = pendingOffer ?: return
+        val offer = pendingOffer?.takeIf {
+            _state.value.phase == CallPhase.INCOMING && it.sessionKind == SignalMessage.SESSION_VIDEO
+        } ?: return
         notifyCallAccepted(offer)
         acceptOffer(offer, withMedia = true)
     }
@@ -743,10 +743,8 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
 
     fun closeChatLocally() {
         _state.update { it.copy(chatVisible = false) }
-        val current = _state.value
-        if (activeSessionKind == SignalMessage.SESSION_CHAT && activeCallId != null) {
-            ChatNotifications.showActive(getApplication(), current.remoteName ?: activeRemoteId.orEmpty(), activeCallId)
-        }
+        // Minimizing is silent; only an invitation or an actual unread message warrants a notification.
+        if (activeSessionKind == SignalMessage.SESSION_CHAT) ChatNotifications.cancel(getApplication(), activeCallId)
     }
 
     fun hideFileTransfer() {
@@ -804,10 +802,6 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
 
     fun openLocalChat(peer: String) {
         if (!peer.matches(Regex("[A-Z0-9]{4}-[A-Z0-9]{4}"))) return
-        if (activeRemoteId != null && activeRemoteId != peer) {
-            _state.update { it.copy(diagnostic = "Zakończ obecną sesję przed otwarciem innego czatu.") }
-            return
-        }
         _state.update { it.copy(chatVisible = true, chatPeerId = peer,
             chatPeerName = it.contacts.firstOrNull { contact -> contact.id == peer }?.name ?: peer,
             chatMessages = if (it.chatPeerId == peer) it.chatMessages else emptyList(),
@@ -1225,6 +1219,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     private fun handleOffer(message: SignalMessage) {
         val from = message.from ?: return
         val callId = message.callId ?: return
+        if (message.sessionKind == SignalMessage.SESSION_VIDEO) releaseChatTransport()
         if (_state.value.phase != CallPhase.READY) {
             signalingClient.send(
                 SignalMessage(
@@ -1248,7 +1243,6 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         val contact = _state.value.contacts.firstOrNull { it.id == from }
         val chatOnly = message.sessionKind == SignalMessage.SESSION_CHAT
         val fileOnly = message.sessionKind == SignalMessage.SESSION_FILE
-        if (!chatOnly && !fileOnly) preferences.saveRecentCaller(from)
         _state.update {
             it.copy(
                 phase = when {
@@ -1269,7 +1263,6 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 chatVisible = false,
                 fileVisible = false,
                 callVisible = true,
-                recentCallers = preferences.recentCallers(),
             )
         }
         signalingClient.setBusy(true)

@@ -23,11 +23,6 @@ data class SentFriendRequest(
     val createdAt: Long,
 )
 
-data class RecentCaller(
-    val id: String,
-    val lastCallAt: Long,
-)
-
 enum class VideoQualityMode {
     AUTO,
     DATA_SAVER,
@@ -43,6 +38,8 @@ class AppPreferences(context: Context) {
     private val preferences = context.getSharedPreferences("wideocall", Context.MODE_PRIVATE)
 
     init {
+        // Privacy migration: drop call history created by earlier versions, never recreate it.
+        if (preferences.contains(KEY_RECENT_CALLERS)) preferences.edit { remove(KEY_RECENT_CALLERS) }
         if (!preferences.getBoolean(KEY_PUSH_ONLY_MIGRATION, false)) {
             preferences.edit()
                 .putBoolean(KEY_WATCH_ENABLED, false)
@@ -109,38 +106,18 @@ class AppPreferences(context: Context) {
         saveContacts(updated)
     }
 
+    fun renameContact(id: String, rawName: String): Result<Contact> = runCatching {
+        val normalizedId = normalizeId(id)
+        val name = ContactNamePolicy.validate(rawName).getOrThrow()
+        val existing = contacts()
+        require(existing.any { it.id == normalizedId }) { "Kontakt nie jest już zapisany." }
+        val renamed = Contact(normalizedId, name)
+        saveContacts(existing.map { if (it.id == normalizedId) renamed else it }.sortedBy { it.name.lowercase() }, synchronous = true)
+        renamed
+    }
+
     fun removeContact(id: String) {
         saveContacts(contacts().filterNot { it.id == normalizeId(id) })
-    }
-
-    fun recentCallers(): List<RecentCaller> {
-        val raw = preferences.getString(KEY_RECENT_CALLERS, "[]") ?: "[]"
-        return runCatching {
-            val array = JSONArray(raw)
-            buildList {
-                for (index in 0 until minOf(array.length(), MAX_RECENT_CALLERS)) {
-                    val item = array.getJSONObject(index)
-                    val id = normalizeId(item.optString("id"))
-                    val lastCallAt = item.optLong("lastCallAt")
-                    if (id.length == 9 && lastCallAt > 0L) add(RecentCaller(id, lastCallAt))
-                }
-            }
-        }.getOrDefault(emptyList())
-    }
-
-    fun saveRecentCaller(id: String, at: Long = System.currentTimeMillis()) {
-        val normalized = normalizeId(id)
-        if (normalized.length != 9 || normalized == myId) return
-        val updated = listOf(RecentCaller(normalized, at)) + recentCallers().filterNot { it.id == normalized }
-        val array = JSONArray()
-        updated.take(MAX_RECENT_CALLERS).forEach { caller ->
-            array.put(JSONObject().put("id", caller.id).put("lastCallAt", caller.lastCallAt))
-        }
-        preferences.edit { putString(KEY_RECENT_CALLERS, array.toString()) }
-    }
-
-    fun clearRecentCallers() {
-        preferences.edit { remove(KEY_RECENT_CALLERS) }
     }
 
     fun friendRequests(): List<FriendRequest> {
@@ -215,12 +192,13 @@ class AppPreferences(context: Context) {
         saveSentFriendRequests(sentFriendRequests().filterNot { it.requestId == requestId })
     }
 
-    private fun saveContacts(contacts: List<Contact>) {
+    private fun saveContacts(contacts: List<Contact>, synchronous: Boolean = false) {
         val array = JSONArray()
         contacts.forEach { contact ->
             array.put(JSONObject().put("id", contact.id).put("name", contact.name))
         }
-        preferences.edit().putString(KEY_CONTACTS, array.toString()).apply()
+        val edit = preferences.edit().putString(KEY_CONTACTS, array.toString())
+        if (synchronous) check(edit.commit()) { "Nie udało się zapisać nazwy na telefonie." } else edit.apply()
     }
 
     private fun saveFriendRequests(requests: List<FriendRequest>) {
@@ -264,7 +242,6 @@ class AppPreferences(context: Context) {
         private const val ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
         private val random = SecureRandom()
         private const val MAX_FRIEND_REQUESTS = 20
-        private const val MAX_RECENT_CALLERS = 20
 
         fun normalizeId(value: String): String = value
             .uppercase()

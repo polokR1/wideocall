@@ -7,10 +7,25 @@ import org.junit.Rule
 import org.junit.Test
 import pl.wideocall.app.call.AppUiState
 import pl.wideocall.app.call.CallPhase
+import pl.wideocall.app.call.EphemeralChatMessage
 import pl.wideocall.app.ui.theme.WideocallTheme
 
 class ChatSecurityUiTest {
     @get:Rule val compose = createComposeRule()
+
+    @Test fun deliveryStatusDoesNotClaimMessageWasRead() {
+        val state = AppUiState("ABCD-EF23", "Test", emptyList(), chatMessages = listOf(
+            EphemeralChatMessage("pending", "Czeka", true, 0, pending = true),
+            EphemeralChatMessage("delivered", "Dostarczona", true, 0, pending = false),
+        ))
+        compose.setContent { WideocallTheme {
+            EphemeralChatPanel(state, onClose = {}, onSend = { false }, onDraftChanged = {})
+        } }
+        compose.onNodeWithText("Czeka na dostarczenie").assertIsDisplayed()
+        compose.onNodeWithText("Dostarczono na telefon").assertIsDisplayed()
+        compose.onNodeWithText("Odbiór potwierdzony").assertDoesNotExist()
+        compose.onNodeWithText("Przeczytano").assertDoesNotExist()
+    }
 
     @Test fun failedChatSendKeepsDraftAndDisplaysError() {
         val state = mutableStateOf(AppUiState("ABCD-EF23", "Test", emptyList(), phase = CallPhase.IN_CHAT, chatReady = true))

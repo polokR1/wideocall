@@ -2,6 +2,8 @@ package pl.wideocall.app.call
 
 import android.content.Context
 import android.media.AudioAttributes
+import android.os.Build
+import android.util.Log
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import pl.wideocall.app.data.AppPreferences
@@ -68,7 +70,10 @@ class WebRtcClient(
         )
         .setUseHardwareAcousticEchoCanceler(true)
         .setUseHardwareNoiseSuppressor(true)
-        .setUseLowLatency(true)
+        // Opting into FAST playback failed on the physical moto g stylus / Android 11:
+        // zero-frame playback buffer, repeated underruns, then AudioTrack.write failed (-1).
+        // Use WebRTC's normal playback path; keep Telecom routing and real audio errors intact.
+        .setUseLowLatency(false)
         .setAudioRecordErrorCallback(object : JavaAudioDeviceModule.AudioRecordErrorCallback {
             override fun onWebRtcAudioRecordInitError(errorMessage: String) {
                 listener.onError("Mikrofon nie został uruchomiony: $errorMessage")
@@ -78,7 +83,7 @@ class WebRtcClient(
                 errorCode: JavaAudioDeviceModule.AudioRecordStartErrorCode,
                 errorMessage: String,
             ) {
-                listener.onError("Nagrywanie dźwięku nie wystartowało ($errorCode): $errorMessage")
+                listener.onError("Mikrofon rozmowy nie został uruchomiony ($errorCode): $errorMessage")
             }
 
             override fun onWebRtcAudioRecordError(errorMessage: String) {
@@ -122,6 +127,7 @@ class WebRtcClient(
     private var videoProfile = VideoProfile.wifi()
 
     init {
+        Log.i("WideocallAudio", "audio_config lowLatency=false api=${Build.VERSION.SDK_INT}")
         PeerConnectionFactory.initialize(
             PeerConnectionFactory.InitializationOptions.builder(appContext)
                 .setEnableInternalTracer(false)

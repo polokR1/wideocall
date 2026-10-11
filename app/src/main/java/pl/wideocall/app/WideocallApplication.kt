@@ -23,6 +23,7 @@ class WideocallApplication : Application() {
         ProcessLifecycleOwner.get().lifecycle.addObserver(AppVisibility)
         CallNotifications.createChannels(this)
         ChatNotifications.createChannel(this)
+        ChatNotifications.removeLegacyMinimizedNotifications(this)
         FileTransferNotifications.createChannel(this)
         TelecomCallBridge.initialize(this)
         maintenanceScope.launch {
