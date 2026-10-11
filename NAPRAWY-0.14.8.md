@@ -8,4 +8,5 @@
 
 - Testy jednostkowe, lint i testy instrumentacyjne sprawdzają ponowne połączenie po powrocie, prywatność powiadomienia oraz jego usunięcie po zakończeniu usługi.
 - Powiadomienie i usługa systemowa pomagają utrzymać aktywny transport po schowaniu aplikacji. Nie gwarantują odbioru po utracie sieci, wymuszonym zatrzymaniu aplikacji ani restrykcjach oszczędzania energii producenta.
-- Przywrócenie połączenia przychodzącego trzeba potwierdzić na S23 Ultra z zablokowanym ekranem po instalacji 0.14.8 na obu urządzeniach. Build i test emulatora nie dowodzą poprawnego działania systemowego ekranu połączenia na fizycznym telefonie.
+- Test fizyczny 2026-10-11: Motorola g stylus XT2115DL / Android 11 → Samsung S23 Ultra SM-S918B / Android 16. Android uruchomił ekran Wideocall dla przychodzącego połączenia, aplikacja wznowiła sygnalizację w około 0,4 s i odebrała ofertę. Motorola zarejestrowała `accepted` i odpowiedź WebRTC w dwóch próbach. Weryfikuje to wyświetlenie interfejsu i możliwość odebrania na tych egzemplarzach; rozmowy nie utrzymano przez minutę, a jakości toru audio/wideo nie mierzono.
+- Logi systemowe i aplikacji z obu telefonów: `app/build/reports/verification-0.14.8/`. Build i testy emulatora nie zastępują sprawdzenia jakości rozmowy w różnych sieciach i na innych urządzeniach.
