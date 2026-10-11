@@ -24,7 +24,7 @@ object CallNotifications {
     const val ACTION_TELECOM_ANSWER = "pl.wideocall.app.TELECOM_ANSWER_CALL"
     const val ACTION_TELECOM_DECLINE = "pl.wideocall.app.TELECOM_DECLINE_CALL"
     const val ACTION_TELECOM_HANG_UP = "pl.wideocall.app.TELECOM_HANG_UP"
-    private const val ACTION_SHOW_INCOMING = "pl.wideocall.app.SHOW_INCOMING_CALL"
+    const val ACTION_SHOW_INCOMING = "pl.wideocall.app.SHOW_INCOMING_CALL"
     const val EXTRA_CALL_ID = "call_id"
     const val EXTRA_CALLER_ID = "caller_id"
     // New id reapplies the corrected ringtone defaults for existing installations.
@@ -79,7 +79,7 @@ object CallNotifications {
         }
     }
 
-    @Synchronized fun showIncoming(context: Context, callerId: String, callId: String) {
+    @Synchronized fun showIncoming(context: Context, callerId: String, callId: String, video: Boolean = true) {
         val handled = context.getSharedPreferences("handled_calls", Context.MODE_PRIVATE)
         val posted = context.getSharedPreferences("posted_incoming_calls", Context.MODE_PRIVATE)
         val now = System.currentTimeMillis()
@@ -94,7 +94,7 @@ object CallNotifications {
         val showIncoming = callIntent(context, ACTION_SHOW_INCOMING, callerId, callId, 5)
         val notification = NotificationCompat.Builder(context, INCOMING_CHANNEL)
             .setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle("Połączenie wideo")
+            .setContentTitle(if (video) "Połączenie wideo" else "Połączenie głosowe")
             .setContentText(callerId)
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setPriority(NotificationCompat.PRIORITY_MAX)

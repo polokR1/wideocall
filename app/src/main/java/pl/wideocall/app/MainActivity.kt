@@ -176,17 +176,17 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true)
             setTurnScreenOn(true)
-        } else {
-            @Suppress("DEPRECATION")
-            window.addFlags(
-                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
-                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON,
-            )
         }
+        @Suppress("DEPRECATION")
+        window.addFlags(
+            WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON,
+        )
     }
 
     override fun onResume() {
         super.onResume()
+        if (intent?.action == CallNotifications.ACTION_SHOW_INCOMING) configureLockedScreen()
         refreshFullScreenIntentPermission()
         viewModel.onAppVisible()
         applyCallScreenAwake()
@@ -209,11 +209,13 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        if (intent.action == CallNotifications.ACTION_SHOW_INCOMING) configureLockedScreen()
         captureNotificationAction(intent)
     }
 
     override fun onStart() {
         super.onStart()
+        if (intent?.action == CallNotifications.ACTION_SHOW_INCOMING) configureLockedScreen()
         viewModel.refreshPreferences()
         viewModel.onAppVisible()
     }
@@ -263,6 +265,8 @@ private fun PermissionGate(
     var notificationGranted by remember { mutableStateOf(hasNotificationPermission(context)) }
     var pendingMediaAction by remember { mutableStateOf<(() -> Unit)?>(null) }
     var showMediaExplanation by remember { mutableStateOf(false) }
+    var audioOnlyPermissionRequest by remember { mutableStateOf(false) }
+    var pendingPermissions by remember { mutableStateOf(requiredMediaPermissions()) }
     var mediaDenied by remember { mutableStateOf(false) }
     val mediaLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -270,17 +274,30 @@ private fun PermissionGate(
         permissionsGranted = hasMediaPermissions(context)
         val pending = pendingMediaAction
         pendingMediaAction = null
-        if (permissionsGranted) pending?.invoke()
+        if (pendingPermissions.all { context.checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }) pending?.invoke()
         else mediaDenied = true
     }
     val notificationLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { notificationGranted = hasNotificationPermission(context) }
     val requestMediaPermissionsAndThen: (() -> Unit) -> Unit = { action ->
-        if (hasMediaPermissions(context)) {
-            permissionsGranted = true
+        val requested = requiredMediaPermissions()
+        if (requested.all { context.checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }) {
+            permissionsGranted = hasMediaPermissions(context)
             action()
         } else {
+            pendingPermissions = requested
+            audioOnlyPermissionRequest = false
+            pendingMediaAction = action
+            showMediaExplanation = true
+        }
+    }
+    val requestAudioPermissionsAndThen: (() -> Unit) -> Unit = { action ->
+        val requested = arrayOf(Manifest.permission.RECORD_AUDIO)
+        if (requested.all { context.checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }) action()
+        else {
+            pendingPermissions = requested
+            audioOnlyPermissionRequest = true
             pendingMediaAction = action
             showMediaExplanation = true
         }
@@ -299,15 +316,16 @@ private fun PermissionGate(
 
     if (showMediaExplanation) {
         MediaPermissionExplanation(
+            audioOnly = audioOnlyPermissionRequest,
             onDismiss = { showMediaExplanation = false; pendingMediaAction = null },
-            onContinue = { showMediaExplanation = false; mediaLauncher.launch(requiredMediaPermissions()) },
+            onContinue = { showMediaExplanation = false; mediaLauncher.launch(pendingPermissions) },
         )
     }
     if (mediaDenied) {
         AlertDialog(
             onDismissRequest = { mediaDenied = false },
             title = { Text("Rozmowa nie została uruchomiona") },
-            text = { Text("Nie udzielono dostępu do kamery i mikrofonu. Czat i pliki nadal działają bez tych zgód. Jeśli Android nie pyta ponownie, dostęp można włączyć w ustawieniach aplikacji.") },
+            text = { Text("Nie udzielono wymaganej zgody na użycie ${if (audioOnlyPermissionRequest) "mikrofonu" else "kamery i mikrofonu"} podczas rozmowy. Czat i pliki nadal działają bez tych zgód. Jeśli Android nie pyta ponownie, dostęp można włączyć w ustawieniach aplikacji.") },
             confirmButton = { TextButton(onClick = { mediaDenied = false }) { Text("Rozumiem") } },
             dismissButton = { TextButton(onClick = {
                 mediaDenied = false
@@ -323,6 +341,7 @@ private fun PermissionGate(
     }
 
     val state by viewModel.state.collectAsState()
+    val requestCurrentCallPermissions: (() -> Unit) -> Unit = if (state.audioOnlyCall) requestAudioPermissionsAndThen else requestMediaPermissionsAndThen
     var showExitConfirmation by remember { mutableStateOf(false) }
     SecureChatWindow(
         enabled = state.phase in setOf(
@@ -343,13 +362,13 @@ private fun PermissionGate(
         when (action.action) {
             CallNotifications.ACTION_ANSWER -> if (state.phase == CallPhase.INCOMING) {
                 consumeNotificationAction()
-                requestMediaPermissionsAndThen {
+                requestCurrentCallPermissions {
                     if (viewModel.state.value.callId == action.callId) viewModel.acceptIncomingCall()
                 }
             }
             CallNotifications.ACTION_TELECOM_ANSWER -> if (state.phase == CallPhase.INCOMING) {
                 consumeNotificationAction()
-                requestMediaPermissionsAndThen {
+                requestCurrentCallPermissions {
                     if (viewModel.state.value.callId == action.callId) viewModel.acceptIncomingCallFromTelecom()
                 }
             }
@@ -403,7 +422,7 @@ private fun PermissionGate(
     } else when (state.phase) {
         CallPhase.INCOMING -> if (state.callVisible) {
             IncomingCallScreen(state, viewModel, permissionsGranted) {
-                requestMediaPermissionsAndThen {
+            requestCurrentCallPermissions {
                     if (viewModel.state.value.callId == state.callId) viewModel.acceptIncomingCall()
                 }
             }
@@ -415,6 +434,7 @@ private fun PermissionGate(
             fullScreenIntentAllowed = fullScreenIntentAllowed,
             requestFullScreenIntent = requestFullScreenIntent,
             requestCallPermissions = requestMediaPermissionsAndThen,
+            requestAudioCallPermissions = requestAudioPermissionsAndThen,
             requestNotifications = {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
@@ -423,7 +443,9 @@ private fun PermissionGate(
         )
         CallPhase.OUTGOING,
         CallPhase.CONNECTING_CALL,
-        CallPhase.IN_CALL -> if (state.callVisible) VideoCallScreen(state, viewModel) else HomeScreen(
+        CallPhase.IN_CALL -> if (state.callVisible) {
+            if (state.audioOnlyCall) AudioCallScreen(state, viewModel) else VideoCallScreen(state, viewModel)
+        } else HomeScreen(
             state = state,
             viewModel = viewModel,
             permissionsGranted = permissionsGranted,
@@ -431,6 +453,7 @@ private fun PermissionGate(
             fullScreenIntentAllowed = fullScreenIntentAllowed,
             requestFullScreenIntent = requestFullScreenIntent,
             requestCallPermissions = requestMediaPermissionsAndThen,
+            requestAudioCallPermissions = requestAudioPermissionsAndThen,
             requestNotifications = {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
@@ -445,6 +468,7 @@ private fun PermissionGate(
             fullScreenIntentAllowed = fullScreenIntentAllowed,
             requestFullScreenIntent = requestFullScreenIntent,
             requestCallPermissions = requestMediaPermissionsAndThen,
+            requestAudioCallPermissions = requestAudioPermissionsAndThen,
             requestNotifications = {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
@@ -459,6 +483,7 @@ private fun PermissionGate(
             fullScreenIntentAllowed = fullScreenIntentAllowed,
             requestFullScreenIntent = requestFullScreenIntent,
             requestCallPermissions = requestMediaPermissionsAndThen,
+            requestAudioCallPermissions = requestAudioPermissionsAndThen,
             requestNotifications = {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
@@ -474,6 +499,7 @@ private fun PermissionGate(
             fullScreenIntentAllowed = fullScreenIntentAllowed,
             requestFullScreenIntent = requestFullScreenIntent,
             requestCallPermissions = requestMediaPermissionsAndThen,
+            requestAudioCallPermissions = requestAudioPermissionsAndThen,
             requestNotifications = {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
@@ -488,6 +514,7 @@ private fun PermissionGate(
             fullScreenIntentAllowed = fullScreenIntentAllowed,
             requestFullScreenIntent = requestFullScreenIntent,
             requestCallPermissions = requestMediaPermissionsAndThen,
+            requestAudioCallPermissions = requestAudioPermissionsAndThen,
             requestNotifications = {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
@@ -577,6 +604,7 @@ private fun HomeScreen(
     fullScreenIntentAllowed: Boolean,
     requestFullScreenIntent: () -> Unit,
     requestCallPermissions: (() -> Unit) -> Unit,
+    requestAudioCallPermissions: (() -> Unit) -> Unit,
     requestNotifications: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -714,6 +742,9 @@ private fun HomeScreen(
                         onCall = {
                             requestCallPermissions { viewModel.call(contact) }
                         },
+                        onAudioCall = {
+                            requestAudioCallPermissions { viewModel.audioCall(contact) }
+                        },
                         onChat = { viewModel.openContactChat(contact) },
                         onFile = {
                             fileTarget = contact
@@ -838,11 +869,11 @@ private fun MyIdCard(myId: String, onCopy: () -> Unit) {
 }
 
 @Composable
-internal fun MediaPermissionExplanation(onDismiss: () -> Unit, onContinue: () -> Unit) {
+internal fun MediaPermissionExplanation(audioOnly: Boolean = false, onDismiss: () -> Unit, onContinue: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Kamera i mikrofon podczas rozmowy") },
-        text = { Text("Kamera przesyła obraz, a mikrofon Twój głos na żywo do rozmówcy. Wideocall nie zapisuje nagrania rozmowy. Android może nazwać tę zgodę „nagrywaniem” — jest ona potrzebna także do transmisji na żywo. Kamera i mikrofon nie są używane przez czat ani transfer plików. W oknie systemowym możesz wybrać „Podczas używania aplikacji” lub dostęp jednorazowy, jeśli telefon oferuje te opcje.") },
+        title = { Text(if (audioOnly) "Mikrofon podczas rozmowy głosowej" else "Kamera i mikrofon podczas rozmowy") },
+        text = { Text(if (audioOnly) "Mikrofon przesyła Twój głos na żywo do rozmówcy. Kamera nie jest włączana ani wymagana. Wideocall nie zapisuje nagrania rozmowy. Android może nazwać tę zgodę „nagrywaniem” — dotyczy to także transmisji głosu na żywo." else "Kamera przesyła obraz, a mikrofon Twój głos na żywo do rozmówcy. Wideocall nie zapisuje nagrania rozmowy. Android może nazwać tę zgodę „nagrywaniem” — jest ona potrzebna także do transmisji na żywo. Kamera i mikrofon nie są używane przez czat ani transfer plików. W oknie systemowym możesz wybrać „Podczas używania aplikacji” lub dostęp jednorazowy, jeśli telefon oferuje te opcje.") },
         confirmButton = { Button(onClick = onContinue) { Text("Przejdź do zgody Androida") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Nie teraz") } },
     )
@@ -1061,12 +1092,14 @@ private fun ContactCard(
     chatEnabled: Boolean,
     fileEnabled: Boolean,
     onCall: () -> Unit,
+    onAudioCall: () -> Unit,
     onChat: () -> Unit,
     onFile: () -> Unit,
     onDelete: () -> Unit,
     onEdit: () -> Unit,
 ) {
     var showMenu by remember { mutableStateOf(false) }
+    var showCallMenu by remember { mutableStateOf(false) }
     val presenceColor = when {
         presence?.busy == true -> Color(0xFFFF6B6B)
         presence?.online == true -> Color(0xFF3DDC97)
@@ -1128,8 +1161,14 @@ private fun ContactCard(
                     tint = if (chatEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
                 )
             }
-            IconButton(onClick = onCall, enabled = callEnabled) {
-                Icon(Icons.Default.Videocam, "Zadzwoń", tint = if (callEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline)
+            Box {
+                IconButton(onClick = { showCallMenu = true }, enabled = callEnabled) {
+                    Icon(Icons.Default.Call, "Zadzwoń", tint = if (callEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline)
+                }
+                DropdownMenu(expanded = showCallMenu, onDismissRequest = { showCallMenu = false }) {
+                    DropdownMenuItem(text = { Text("Połączenie głosowe") }, onClick = { showCallMenu = false; onAudioCall() })
+                    DropdownMenuItem(text = { Text("Wideorozmowa") }, onClick = { showCallMenu = false; onCall() })
+                }
             }
         }
     }
@@ -1307,10 +1346,10 @@ private fun IncomingCallScreen(
             modifier = Modifier.size(112.dp).background(Color(0xFF173B2E), CircleShape),
             contentAlignment = Alignment.Center,
         ) {
-            Icon(Icons.Default.Videocam, null, modifier = Modifier.size(54.dp), tint = Color(0xFF62E6A7))
+            Icon(if (state.audioOnlyCall) Icons.Default.Call else Icons.Default.Videocam, null, modifier = Modifier.size(54.dp), tint = Color(0xFF62E6A7))
         }
         Spacer(Modifier.height(30.dp))
-        Text("Połączenie przychodzące", color = Color.White.copy(alpha = .65f), fontSize = 16.sp)
+        Text(if (state.audioOnlyCall) "Połączenie głosowe" else "Połączenie wideo", color = Color.White.copy(alpha = .65f), fontSize = 16.sp)
         Text(state.remoteName ?: state.remoteId.orEmpty(), color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
         Text(state.remoteId.orEmpty(), color = Color.White.copy(alpha = .55f), letterSpacing = 1.sp)
         Spacer(Modifier.height(64.dp))
@@ -1389,6 +1428,48 @@ private fun VideoCallScreen(state: AppUiState, viewModel: CallViewModel) {
                 onClick = viewModel::toggleSpeaker,
             )
         }
+    }
+}
+
+@Composable
+private fun AudioCallScreen(state: AppUiState, viewModel: CallViewModel) {
+    Column(
+        modifier = Modifier.fillMaxSize().background(Color(0xFF07130F)).statusBarsPadding().navigationBarsPadding().padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Box(Modifier.size(144.dp).background(Color(0xFF173B2E), CircleShape), contentAlignment = Alignment.Center) {
+            Icon(Icons.Default.Call, null, tint = Color(0xFF62E6A7), modifier = Modifier.size(64.dp))
+        }
+        Spacer(Modifier.height(26.dp))
+        Text(state.remoteName ?: state.remoteId.orEmpty(), color = Color.White, fontSize = 25.sp, fontWeight = FontWeight.Bold)
+        Text(state.status, color = Color.White.copy(alpha = .72f), modifier = Modifier.padding(top = 6.dp))
+        SecurityStatusIcon(state, onVerify = { viewModel.markCurrentPeerVerified(state.callId, state.safetyNumber.orEmpty()) }, modifier = Modifier.padding(top = 12.dp), dark = true)
+        Spacer(Modifier.weight(1f))
+        Row(horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.CenterVertically) {
+            RoundIconButton(
+                background = Color.White.copy(alpha = .18f),
+                icon = if (state.microphoneEnabled) Icons.Default.Mic else Icons.Default.MicOff,
+                description = "Mikrofon",
+                onClick = viewModel::toggleMicrophone,
+            )
+            RoundIconButton(Color(0xFFE84C4F), Icons.Default.CallEnd, "Zakończ", size = 68, onClick = viewModel::hangUp)
+            RoundIconButton(
+                background = if (state.speakerphoneEnabled) Color(0xFF3C8DFF) else Color.White.copy(alpha = .18f),
+                icon = Icons.AutoMirrored.Filled.VolumeUp,
+                description = "Wyjście audio: ${state.audioRouteName}",
+                enabled = state.canSwitchAudioRoute && !state.audioRouteChanging,
+                onClick = viewModel::toggleSpeaker,
+            )
+            RoundIconButton(
+                background = Color.White.copy(alpha = .18f),
+                icon = Icons.AutoMirrored.Filled.Chat,
+                description = "Znikający czat",
+                enabled = state.phase == CallPhase.IN_CALL && state.chatReady,
+                onClick = viewModel::openChat,
+            )
+        }
+        Spacer(Modifier.height(32.dp))
     }
 }
 

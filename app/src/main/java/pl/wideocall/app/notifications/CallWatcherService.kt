@@ -137,8 +137,9 @@ class CallWatcherService : Service() {
                         if (sessionKind == "chat") {
                             ChatNotifications.showInvitation(this@CallWatcherService, callerId, callId)
                         } else {
-                            TelecomCallBridge.registerIncoming(callId, callerId)
-                            CallNotifications.showIncoming(this@CallWatcherService, callerId, callId)
+                            val video = sessionKind != "audio"
+                            TelecomCallBridge.registerIncoming(callId, callerId, video)
+                            CallNotifications.showIncoming(this@CallWatcherService, callerId, callId, video)
                         }
                         handler.postDelayed({ expireOffer(snapshot.ref, callId) }, OFFER_MAX_AGE_MS - age)
                     }

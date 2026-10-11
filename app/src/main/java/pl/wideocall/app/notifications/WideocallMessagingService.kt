@@ -5,6 +5,7 @@ import com.google.firebase.messaging.RemoteMessage
 import pl.wideocall.app.data.AppPreferences
 import pl.wideocall.app.BuildConfig
 import pl.wideocall.app.call.TelecomCallBridge
+import pl.wideocall.app.signaling.SignalMessage
 import android.util.Log
 
 class WideocallMessagingService : FirebaseMessagingService() {
@@ -58,8 +59,9 @@ class WideocallMessagingService : FirebaseMessagingService() {
             "incoming_chat" -> ChatNotifications.showInvitation(this, callerId, callId)
             "incoming_file" -> FileTransferNotifications.showInvitation(this, callerId, callId)
             "incoming_call" -> if (!AppVisibility.isForeground) {
-                TelecomCallBridge.registerIncoming(callId, callerId)
-                CallNotifications.showIncoming(this, callerId, callId)
+                val video = data["sessionKind"] != SignalMessage.SESSION_AUDIO
+                TelecomCallBridge.registerIncoming(callId, callerId, video)
+                CallNotifications.showIncoming(this, callerId, callId, video)
             }
         }
     }

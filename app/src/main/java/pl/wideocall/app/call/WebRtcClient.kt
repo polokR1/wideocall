@@ -143,6 +143,7 @@ class WebRtcClient(
     fun prepareSession(
         isCaller: Boolean,
         withMedia: Boolean,
+        withVideo: Boolean,
         turnConfiguration: TurnConfiguration?,
     ) {
         closePeerConnection()
@@ -151,7 +152,7 @@ class WebRtcClient(
         mediaEnabled = withMedia
         frontCamera = AppPreferences(appContext).startWithFrontCamera
         videoProfile = preferredVideoProfile()
-        if (withMedia) startLocalMedia(videoProfile)
+        if (withMedia) startLocalMedia(videoProfile, withVideo)
 
         val iceServers = buildIceServers(turnConfiguration)
         val generation = sessionGeneration
@@ -334,21 +335,22 @@ class WebRtcClient(
         eglBase.release()
     }
 
-    private fun startLocalMedia(profile: VideoProfile) {
-        if (localVideoTrack != null) return
-        val capturer = createCameraCapturer()
-        val helper = SurfaceTextureHelper.create("WideocallCapture", eglContext)
-        val source = peerConnectionFactory.createVideoSource(false)
-        capturer.initialize(helper, appContext, source.capturerObserver)
-        runCatching { capturer.startCapture(profile.width, profile.height, profile.fps) }
-            .onFailure { listener.onError("Nie udało się uruchomić kamery: ${it.message}") }
+    private fun startLocalMedia(profile: VideoProfile, withVideo: Boolean) {
+        if (withVideo && localVideoTrack == null) {
+            val capturer = createCameraCapturer()
+            val helper = SurfaceTextureHelper.create("WideocallCapture", eglContext)
+            val source = peerConnectionFactory.createVideoSource(false)
+            capturer.initialize(helper, appContext, source.capturerObserver)
+            runCatching { capturer.startCapture(profile.width, profile.height, profile.fps) }
+                .onFailure { listener.onError("Nie udało się uruchomić kamery: ${it.message}") }
 
-        videoCapturer = capturer
-        surfaceTextureHelper = helper
-        videoSource = source
-        localVideoTrack = peerConnectionFactory.createVideoTrack("video0", source).apply {
-            setEnabled(true)
-            localRenderer?.let(::addSink)
+            videoCapturer = capturer
+            surfaceTextureHelper = helper
+            videoSource = source
+            localVideoTrack = peerConnectionFactory.createVideoTrack("video0", source).apply {
+                setEnabled(true)
+                localRenderer?.let(::addSink)
+            }
         }
         audioSource = peerConnectionFactory.createAudioSource(MediaConstraints())
         localAudioTrack = peerConnectionFactory.createAudioTrack("audio0", audioSource).apply {

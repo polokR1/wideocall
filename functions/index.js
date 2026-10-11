@@ -43,6 +43,7 @@ exports.notifyIncomingCall = onValueCreated(
           callerId,
           recipientId,
           callId,
+          sessionKind: signal.sessionKind === "audio" ? "audio" : "video",
         },
         android: {
           priority: "high",

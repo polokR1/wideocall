@@ -54,6 +54,7 @@ object TelecomCallBridge {
         val callId: String,
         val remoteId: String,
         val incoming: Boolean,
+        val video: Boolean,
         val actions: Channel<Action>,
         var timeoutJob: Job? = null,
         var appInitiatedDisconnect: Boolean = false,
@@ -107,11 +108,11 @@ object TelecomCallBridge {
         if (listener === value) listener = null
     }
 
-    fun registerIncoming(callId: String, remoteId: String): Boolean =
-        register(callId, remoteId, incoming = true)
+    fun registerIncoming(callId: String, remoteId: String, video: Boolean = true): Boolean =
+        register(callId, remoteId, incoming = true, video = video)
 
-    fun registerOutgoing(callId: String, remoteId: String): Boolean =
-        register(callId, remoteId, incoming = false)
+    fun registerOutgoing(callId: String, remoteId: String, video: Boolean = true): Boolean =
+        register(callId, remoteId, incoming = false, video = video)
 
     fun answer(callId: String) = send(callId, Action.Answer)
 
@@ -150,11 +151,11 @@ object TelecomCallBridge {
     }
 
     @SuppressLint("MissingPermission")
-    private fun register(callId: String, remoteId: String, incoming: Boolean): Boolean {
+    private fun register(callId: String, remoteId: String, incoming: Boolean, video: Boolean): Boolean {
         val manager = callsManager ?: return false
         val registration = synchronized(lock) {
             active?.let { return it.callId == callId }
-            Registration(callId, remoteId, incoming, Channel(Channel.BUFFERED)).also { active = it }
+            Registration(callId, remoteId, incoming, video, Channel(Channel.BUFFERED)).also { active = it }
         }
         val attributes = CallAttributesCompat(
             displayName = remoteId,
@@ -164,7 +165,7 @@ object TelecomCallBridge {
             } else {
                 CallAttributesCompat.DIRECTION_OUTGOING
             },
-            callType = CallAttributesCompat.CALL_TYPE_VIDEO_CALL,
+            callType = if (video) CallAttributesCompat.CALL_TYPE_VIDEO_CALL else CallAttributesCompat.CALL_TYPE_AUDIO_CALL,
             callCapabilities = 0,
         )
 
@@ -244,7 +245,7 @@ object TelecomCallBridge {
     private suspend fun CallControlScope.processActions(registration: Registration) {
         for (action in registration.actions) {
             val result = when (action) {
-                Action.Answer -> answer(CallAttributesCompat.CALL_TYPE_VIDEO_CALL).also {
+                Action.Answer -> answer(if (registration.video) CallAttributesCompat.CALL_TYPE_VIDEO_CALL else CallAttributesCompat.CALL_TYPE_AUDIO_CALL).also {
                     if (it !is CallControlResult.Error) registration.mediaActive = true
                 }
                 Action.Activate -> {

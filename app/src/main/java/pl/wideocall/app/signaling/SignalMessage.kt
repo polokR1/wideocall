@@ -64,6 +64,7 @@ data class SignalMessage(
 
     companion object {
         const val SESSION_VIDEO = "video"
+        const val SESSION_AUDIO = "audio"
         const val SESSION_CHAT = "chat"
         const val SESSION_FILE = "file"
         const val SESSION_CONTACT = "contact"

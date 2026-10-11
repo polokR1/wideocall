@@ -42,8 +42,8 @@ class WebRtcDataChannelTest {
             repeat(2) { round ->
                 ready.set(CountDownLatch(2))
                 instrumentation.runOnMainSync {
-                    left.prepareSession(isCaller = true, withMedia = false, turnConfiguration = null)
-                    right.prepareSession(isCaller = false, withMedia = false, turnConfiguration = null)
+                    left.prepareSession(isCaller = true, withMedia = false, withVideo = false, turnConfiguration = null)
+                    right.prepareSession(isCaller = false, withMedia = false, withVideo = false, turnConfiguration = null)
                     left.createOffer { offer -> main.post {
                         right.setRemoteDescription("offer", offer.description) { main.post {
                             right.createAnswer { answer -> main.post { left.setRemoteDescription("answer", answer.description) } }

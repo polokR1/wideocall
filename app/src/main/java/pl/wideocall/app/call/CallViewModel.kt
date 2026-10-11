@@ -85,6 +85,7 @@ data class AppUiState(
     val canSwitchAudioRoute: Boolean = false,
     val audioRouteChanging: Boolean = false,
     val frontCamera: Boolean = true,
+    val audioOnlyCall: Boolean = false,
     val chatMessages: List<EphemeralChatMessage> = emptyList(),
     val chatReady: Boolean = false,
     val chatDraft: String = "",
@@ -430,6 +431,11 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         startOutgoingSession(contact, SignalMessage.SESSION_VIDEO)
     }
 
+    fun audioCall(contact: Contact) {
+        releaseChatTransport()
+        startOutgoingSession(contact, SignalMessage.SESSION_AUDIO)
+    }
+
     fun openContactChat(contact: Contact) {
         _state.update { it.copy(chatPeerId = contact.id, chatPeerName = contact.name, chatVisible = true, chatSendError = null,
             chatMessages = if (it.chatPeerId == contact.id) it.chatMessages else emptyList(),
@@ -545,6 +551,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 chatVisible = window.chatVisible,
                 fileVisible = fileOnly,
                 callVisible = true,
+                audioOnlyCall = sessionKind == SignalMessage.SESSION_AUDIO,
                 unreadChatCount = 0,
                 safetyNumber = null,
                 peerIdentityVerified = false,
@@ -558,7 +565,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 .onFailure { error -> _state.update { it.copy(diagnostic = "Czat w tle: ${error.javaClass.simpleName}.") } }
         }
         if (!dataOnly) {
-            if (!TelecomCallBridge.registerOutgoing(callId, contact.id)) {
+            if (!TelecomCallBridge.registerOutgoing(callId, contact.id, video = sessionKind == SignalMessage.SESSION_VIDEO)) {
                 _state.update { it.copy(diagnostic = "Android Telecom: system nie zarejestrował połączenia wychodzącego.") }
             }
             runCatching { OngoingCallService.start(getApplication(), contact.name, callId) }
@@ -574,7 +581,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         startSetupTimeout(callId, contact.id)
         val preparingAt = SystemClock.elapsedRealtime()
         Log.i("WideocallCall", "outgoing_prepare kind=$sessionKind")
-        prepareWebRtcSession(callId, isCaller = true, withMedia = !dataOnly) {
+        prepareWebRtcSession(callId, isCaller = true, withMedia = !dataOnly, withVideo = sessionKind == SignalMessage.SESSION_VIDEO) {
             webRtcClient.createOffer { offer ->
                 val sent = signalingClient.send(
                     SignalMessage(
@@ -595,7 +602,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
 
     fun acceptIncomingCall() {
         val offer = pendingOffer?.takeIf {
-            _state.value.phase == CallPhase.INCOMING && it.sessionKind == SignalMessage.SESSION_VIDEO
+            _state.value.phase == CallPhase.INCOMING && it.sessionKind in setOf(SignalMessage.SESSION_VIDEO, SignalMessage.SESSION_AUDIO)
         } ?: return
         notifyCallAccepted(offer)
         TelecomCallBridge.answer(offer.callId ?: return)
@@ -604,7 +611,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
 
     fun acceptIncomingCallFromTelecom() {
         val offer = pendingOffer?.takeIf {
-            _state.value.phase == CallPhase.INCOMING && it.sessionKind == SignalMessage.SESSION_VIDEO
+            _state.value.phase == CallPhase.INCOMING && it.sessionKind in setOf(SignalMessage.SESSION_VIDEO, SignalMessage.SESSION_AUDIO)
         } ?: return
         notifyCallAccepted(offer)
         acceptOffer(offer, withMedia = true)
@@ -692,7 +699,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         CallNotifications.cancel(getApplication(), offer.callId)
         ChatNotifications.cancel(getApplication(), offer.callId)
         FileTransferNotifications.cancel(getApplication(), offer.callId)
-        prepareWebRtcSession(callId, isCaller = false, withMedia = withMedia) {
+        prepareWebRtcSession(callId, isCaller = false, withMedia = withMedia, withVideo = offer.sessionKind == SignalMessage.SESSION_VIDEO) {
             webRtcClient.setRemoteDescription(offer.sdpType ?: "offer", sdp) {
                 pendingIncomingCandidates.forEach(webRtcClient::addRemoteIceCandidate)
                 pendingIncomingCandidates.clear()
@@ -1282,7 +1289,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     private fun handleOffer(message: SignalMessage) {
         val from = message.from ?: return
         val callId = message.callId ?: return
-        if (message.sessionKind == SignalMessage.SESSION_VIDEO) releaseChatTransport()
+        if (message.sessionKind in setOf(SignalMessage.SESSION_VIDEO, SignalMessage.SESSION_AUDIO)) releaseChatTransport()
         if (_state.value.phase != CallPhase.READY) {
             signalingClient.send(
                 SignalMessage(
@@ -1326,6 +1333,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 chatVisible = false,
                 fileVisible = false,
                 callVisible = true,
+                audioOnlyCall = message.sessionKind == SignalMessage.SESSION_AUDIO,
             )
         }
         signalingClient.setBusy(true)
@@ -1336,7 +1344,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
             FileTransferNotifications.showInvitation(getApplication(), contact?.name ?: from, callId)
             startIncomingTimeout(message.callId)
         } else {
-            if (!TelecomCallBridge.registerIncoming(callId, contact?.name ?: from)) {
+            if (!TelecomCallBridge.registerIncoming(callId, contact?.name ?: from, video = message.sessionKind == SignalMessage.SESSION_VIDEO)) {
                 _state.update { it.copy(diagnostic = "Android Telecom: system nie zarejestrował połączenia przychodzącego.") }
             }
             runCatching { CallNotifications.showIncoming(getApplication(), contact?.name ?: from, callId) }
@@ -1524,6 +1532,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 canSwitchAudioRoute = false,
                 audioRouteChanging = false,
                 frontCamera = true,
+                audioOnlyCall = false,
                 chatReady = false,
                 callVisible = true,
                 chatEndConfirmationId = null,
@@ -1569,7 +1578,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                         SignalMessage.SESSION_FILE -> "Nie udało się rozpocząć transferu"
                         else -> if (wasRinging) "Nie odebrano" else "Nie udało się zestawić rozmowy"
                     },
-                    if (activeSessionKind == SignalMessage.SESSION_VIDEO) TelecomEnd.MISSED else TelecomEnd.NONE,
+                    if (activeSessionKind in setOf(SignalMessage.SESSION_VIDEO, SignalMessage.SESSION_AUDIO)) TelecomEnd.MISSED else TelecomEnd.NONE,
                 )
                 _state.update { it.copy(diagnostic = "WebRTC: przekroczono limit ${CALL_TIMEOUT_MS / 1_000} sekund na zestawienie sesji. Sprawdź sieć obu telefonów.") }
             }
@@ -1591,7 +1600,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                         SignalMessage.SESSION_FILE -> "Prośba o transfer wygasła"
                         else -> "Nie odebrano"
                     },
-                    if (activeSessionKind == SignalMessage.SESSION_VIDEO) TelecomEnd.MISSED else TelecomEnd.NONE,
+                    if (activeSessionKind in setOf(SignalMessage.SESSION_VIDEO, SignalMessage.SESSION_AUDIO)) TelecomEnd.MISSED else TelecomEnd.NONE,
                 )
             }
         }
@@ -1621,6 +1630,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         callId: String,
         isCaller: Boolean,
         withMedia: Boolean,
+        withVideo: Boolean,
         onPrepared: () -> Unit,
     ) {
         val requestedAt = SystemClock.elapsedRealtime()
@@ -1634,7 +1644,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                     }
                 }
                 runCatching {
-                    webRtcClient.prepareSession(isCaller, withMedia, turnConfiguration)
+                    webRtcClient.prepareSession(isCaller, withMedia, withVideo, turnConfiguration)
                     onPrepared()
                 }.onFailure {
                     failCall(
