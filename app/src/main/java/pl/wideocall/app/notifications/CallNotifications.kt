@@ -16,6 +16,7 @@ import androidx.core.app.Person
 import pl.wideocall.app.MainActivity
 import pl.wideocall.app.R
 import pl.wideocall.app.data.AppPreferences
+import pl.wideocall.app.signaling.SignalMessage
 
 object CallNotifications {
     const val ACTION_ANSWER = "pl.wideocall.app.ANSWER_CALL"
@@ -27,6 +28,7 @@ object CallNotifications {
     const val ACTION_SHOW_INCOMING = "pl.wideocall.app.SHOW_INCOMING_CALL"
     const val EXTRA_CALL_ID = "call_id"
     const val EXTRA_CALLER_ID = "caller_id"
+    const val EXTRA_SESSION_KIND = "session_kind"
     // New id reapplies the corrected ringtone defaults for existing installations.
     private const val INCOMING_CHANNEL = "incoming_calls_v2"
     private const val ONGOING_CHANNEL = "ongoing_calls"
@@ -89,9 +91,10 @@ object CallNotifications {
         }
         createChannels(context)
         val person = Person.Builder().setName(callerId).setImportant(true).build()
-        val answer = callIntent(context, ACTION_ANSWER, callerId, callId, 10)
-        val decline = callIntent(context, ACTION_DECLINE, callerId, callId, 20)
-        val showIncoming = callIntent(context, ACTION_SHOW_INCOMING, callerId, callId, 5)
+        val sessionKind = if (video) SignalMessage.SESSION_VIDEO else SignalMessage.SESSION_AUDIO
+        val answer = callIntent(context, ACTION_ANSWER, callerId, callId, 10, sessionKind)
+        val decline = callIntent(context, ACTION_DECLINE, callerId, callId, 20, sessionKind)
+        val showIncoming = callIntent(context, ACTION_SHOW_INCOMING, callerId, callId, 5, sessionKind)
         val notification = NotificationCompat.Builder(context, INCOMING_CHANNEL)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(if (video) "Połączenie wideo" else "Połączenie głosowe")
@@ -162,11 +165,13 @@ object CallNotifications {
         callerId: String,
         callId: String,
         offset: Int,
+        sessionKind: String? = null,
     ): PendingIntent {
         val intent = Intent(context, MainActivity::class.java).apply {
             this.action = action
             putExtra(EXTRA_CALL_ID, callId)
             putExtra(EXTRA_CALLER_ID, callerId)
+            sessionKind?.let { putExtra(EXTRA_SESSION_KIND, it) }
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
         return PendingIntent.getActivity(
