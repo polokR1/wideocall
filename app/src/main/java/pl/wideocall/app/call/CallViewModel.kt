@@ -177,6 +177,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     private var activeIsCaller = false
     private var iceConnected = false
     private var pendingOffer: SignalMessage? = null
+    private var deferredIncomingOffer: Pair<SignalMessage, Long>? = null
     private val pendingIncomingCandidates = mutableListOf<IceCandidate>()
     private var callTimeoutJob: Job? = null
     private var reconnectJob: Job? = null
@@ -930,6 +931,19 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         TurnCredentialProvider.prefetch(_state.value.myId)
         signalingClient.observeContacts(_state.value.contacts.map(Contact::id))
         _state.update { SessionStatePolicy.signalingReady(it, hasActiveSession(), iceConnected, activeSessionKind) }
+        val deferred = deferredIncomingOffer
+        deferredIncomingOffer = null
+        if (deferred != null) {
+            if (SystemClock.elapsedRealtime() - deferred.second <= INCOMING_OFFER_DEFER_MS &&
+                _state.value.phase == CallPhase.READY && activeCallId == null
+            ) {
+                Log.i("WideocallCall", "incoming_offer_deferred_until_ready")
+                handleOffer(deferred.first)
+            } else {
+                Log.w("WideocallCall", "incoming_offer_expired_during_reconnect")
+                _state.update { it.copy(diagnostic = "Połączenie wygasło podczas łączenia z usługą. Poproś rozmówcę o ponowienie.") }
+            }
+        }
     }
 
     override fun onDisconnected(reason: String) = onMain {
@@ -1291,6 +1305,13 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
         val callId = message.callId ?: return
         if (message.sessionKind in setOf(SignalMessage.SESSION_VIDEO, SignalMessage.SESSION_AUDIO)) releaseChatTransport()
         if (_state.value.phase != CallPhase.READY) {
+            if (activeCallId == null && _state.value.phase in setOf(CallPhase.CONNECTING_SERVER, CallPhase.SERVER_ERROR)) {
+                if (deferredIncomingOffer == null || deferredIncomingOffer?.first?.callId == callId) {
+                    deferredIncomingOffer = message to SystemClock.elapsedRealtime()
+                    Log.i("WideocallCall", "incoming_offer_deferred phase=${_state.value.phase}")
+                    return
+                }
+            }
             signalingClient.send(
                 SignalMessage(
                     type = "busy",
@@ -1761,6 +1782,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
 
     companion object {
         private const val CALL_TIMEOUT_MS = 35_000L
+        private const val INCOMING_OFFER_DEFER_MS = 35_000L
         private val RECONNECT_DELAYS_MS = longArrayOf(1_500L, 3_000L, 6_000L, 10_000L)
         private const val NETWORK_CHANGE_RECOVERY_DELAY_MS = 1_500L
         private const val ICE_DISCONNECTED_GRACE_MS = 4_000L

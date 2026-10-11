@@ -113,6 +113,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -142,8 +143,15 @@ import pl.wideocall.app.filetransfer.FileTransferStatus
 import pl.wideocall.app.signaling.ContactPresence
 import pl.wideocall.app.ui.theme.WideocallTheme
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.delay
 
-private data class NotificationAction(val action: String, val callId: String, val peerId: String? = null)
+private data class NotificationAction(
+    val action: String,
+    val callId: String,
+    val peerId: String? = null,
+    val callerId: String? = null,
+    val sessionKind: String? = null,
+)
 
 class MainActivity : ComponentActivity() {
     private val viewModel: CallViewModel by viewModels()
@@ -229,6 +237,7 @@ class MainActivity : ComponentActivity() {
                 CallNotifications.ACTION_TELECOM_ANSWER,
                 CallNotifications.ACTION_TELECOM_DECLINE,
                 CallNotifications.ACTION_TELECOM_HANG_UP,
+                CallNotifications.ACTION_SHOW_INCOMING,
                 ChatNotifications.ACTION_OPEN_CHAT,
                 FileTransferNotifications.ACTION_OPEN_FILE_TRANSFER,
             )
@@ -244,7 +253,13 @@ class MainActivity : ComponentActivity() {
         if (action == CallNotifications.ACTION_DECLINE) {
             TelecomCallBridge.disconnectRejected(callId)
         }
-        notificationAction.value = NotificationAction(action, callId, intent.getStringExtra(ChatNotifications.EXTRA_PEER_ID))
+        notificationAction.value = NotificationAction(
+            action = action,
+            callId = callId,
+            peerId = intent.getStringExtra(ChatNotifications.EXTRA_PEER_ID),
+            callerId = intent.getStringExtra(CallNotifications.EXTRA_CALLER_ID),
+            sessionKind = intent.getStringExtra(CallNotifications.EXTRA_SESSION_KIND),
+        )
     }
 
     private fun refreshFullScreenIntentPermission() {
@@ -360,6 +375,10 @@ private fun PermissionGate(
         }
         if (action.callId != state.callId) return@LaunchedEffect
         when (action.action) {
+            CallNotifications.ACTION_SHOW_INCOMING -> if (state.phase == CallPhase.INCOMING) {
+                viewModel.openCallScreen()
+                consumeNotificationAction()
+            }
             CallNotifications.ACTION_ANSWER -> if (state.phase == CallPhase.INCOMING) {
                 consumeNotificationAction()
                 requestCurrentCallPermissions {
@@ -404,6 +423,13 @@ private fun PermissionGate(
             }
         }
     }
+    LaunchedEffect(notificationAction?.callId, state.callId) {
+        val action = notificationAction ?: return@LaunchedEffect
+        if (action.action == CallNotifications.ACTION_SHOW_INCOMING && action.callId != state.callId) {
+            delay(30_000L)
+            if (viewModel.state.value.callId != action.callId) consumeNotificationAction()
+        }
+    }
     BackHandler {
         if (state.fileVisible && (state.phase in setOf(CallPhase.INCOMING_FILE, CallPhase.CONNECTING_FILE, CallPhase.IN_FILE) || state.fileTransfer != null)) {
             viewModel.hideFileTransfer()
@@ -415,7 +441,9 @@ private fun PermissionGate(
             }
         }
     }
-    if (state.chatVisible && state.chatPeerId != null && state.phase in setOf(CallPhase.READY, CallPhase.SERVER_ERROR, CallPhase.CONNECTING_SERVER, CallPhase.CONNECTING_CHAT, CallPhase.IN_CHAT, CallPhase.IN_CALL)) {
+    if (notificationAction?.action == CallNotifications.ACTION_SHOW_INCOMING && notificationAction?.callId != state.callId) {
+        IncomingCallWaitingScreen(notificationAction?.callerId, notificationAction?.sessionKind == "audio")
+    } else if (state.chatVisible && state.chatPeerId != null && state.phase in setOf(CallPhase.READY, CallPhase.SERVER_ERROR, CallPhase.CONNECTING_SERVER, CallPhase.CONNECTING_CHAT, CallPhase.IN_CHAT, CallPhase.IN_CALL)) {
         ChatScreen(state, viewModel)
     } else if (state.phase == CallPhase.READY && state.fileVisible && state.fileTransfer != null) {
         FileTransferScreen(state, viewModel)
@@ -1117,36 +1145,42 @@ private fun ContactCard(
         else -> "Offline"
     }
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Box(
-                modifier = Modifier.size(48.dp).background(MaterialTheme.colorScheme.secondaryContainer, CircleShape),
-                contentAlignment = Alignment.Center,
+        Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier.size(48.dp).background(MaterialTheme.colorScheme.secondaryContainer, CircleShape),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(contact.name.take(1).uppercase(), fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                }
+                Column(Modifier.padding(start = 12.dp).weight(1f)) {
+                    Text(contact.name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(contact.id, style = MaterialTheme.typography.bodySmall, letterSpacing = 1.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.size(7.dp).background(presenceColor, CircleShape))
+                        Text(
+                            presenceText,
+                            modifier = Modifier.padding(start = 6.dp),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+                Box {
+                    IconButton(onClick = { showMenu = true }) { Icon(Icons.Default.MoreVert, "Opcje kontaktu") }
+                    DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+                        DropdownMenuItem(text = { Text("Zmień nazwę") }, onClick = { showMenu = false; onEdit() })
+                        DropdownMenuItem(text = { Text("Usuń kontakt") }, onClick = { showMenu = false; onDelete() })
+                    }
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(contact.name.take(1).uppercase(), fontWeight = FontWeight.Bold, fontSize = 18.sp)
-            }
-            Column(Modifier.padding(start = 12.dp).weight(1f)) {
-                Text(contact.name, fontWeight = FontWeight.SemiBold)
-                Text(contact.id, style = MaterialTheme.typography.bodySmall, letterSpacing = 1.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(Modifier.size(7.dp).background(presenceColor, CircleShape))
-                    Text(
-                        presenceText,
-                        modifier = Modifier.padding(start = 6.dp),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-            Box {
-                IconButton(onClick = { showMenu = true }) { Icon(Icons.Default.MoreVert, "Opcje kontaktu") }
-                DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
-                    DropdownMenuItem(text = { Text("Zmień nazwę") }, onClick = { showMenu = false; onEdit() })
-                    DropdownMenuItem(text = { Text("Usuń kontakt") }, onClick = { showMenu = false; onDelete() })
-                }
-            }
             IconButton(onClick = onFile, enabled = fileEnabled) {
                 Icon(
                     Icons.Default.AttachFile,
@@ -1169,6 +1203,7 @@ private fun ContactCard(
                     DropdownMenuItem(text = { Text("Połączenie głosowe") }, onClick = { showCallMenu = false; onAudioCall() })
                     DropdownMenuItem(text = { Text("Wideorozmowa") }, onClick = { showCallMenu = false; onCall() })
                 }
+            }
             }
         }
     }
@@ -1327,6 +1362,24 @@ private fun formatFileSize(bytes: Long): String = when {
     bytes >= 1024L * 1024L -> "%.1f MB".format(bytes / (1024f * 1024f))
     bytes >= 1024L -> "%.1f KB".format(bytes / 1024f)
     else -> "$bytes B"
+}
+
+@Composable
+private fun IncomingCallWaitingScreen(callerId: String?, audioOnly: Boolean) {
+    Column(
+        modifier = Modifier.fillMaxSize().background(Color(0xFF07130F)).statusBarsPadding().padding(28.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Box(Modifier.size(112.dp).background(Color(0xFF173B2E), CircleShape), contentAlignment = Alignment.Center) {
+            Icon(if (audioOnly) Icons.Default.Call else Icons.Default.Videocam, null, modifier = Modifier.size(54.dp), tint = Color(0xFF62E6A7))
+        }
+        Spacer(Modifier.height(30.dp))
+        Text(if (audioOnly) "Połączenie głosowe" else "Połączenie przychodzące", color = Color.White.copy(alpha = .65f), fontSize = 16.sp)
+        Text(callerId ?: "Łączenie z rozmówcą…", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
+        Spacer(Modifier.height(12.dp))
+        Text("Odbieram sygnał połączenia…", color = Color.White.copy(alpha = .65f), textAlign = TextAlign.Center)
+    }
 }
 
 @Composable
