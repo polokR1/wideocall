@@ -42,10 +42,12 @@ Endpointy:
 Wymagane są JDK 17 i Android SDK 36.
 
 ```powershell
-./gradlew.bat test lint assembleDebug
+./gradlew.bat testDebugUnitTest lintRelease assembleRelease
 ```
 
-APK jest tworzone w `app/build/outputs/apk/debug/app-debug.apk`.
+APK Release jest tworzone w `app/build/outputs/apk/release/app-release.apk`; przekazywana, przetestowana kopia to [Wideocall-0.14.11.apk](Wideocall-0.14.11.apk). Debugowanie w Release jest wyłączone. Lokalny build używa certyfikatu rozwojowego danego komputera — na innym komputerze nie zachowa podpisu potrzebnego do aktualizacji już zainstalowanych telefonów. Klucza prywatnego nie publikujemy.
+
+Komendy dla Windows, sumy kontrolne oraz dokładne wyniki testów: [NAPRAWY-0.14.11.md](NAPRAWY-0.14.11.md).
 
 ## Poprawki 0.13.1 (18)
 
@@ -56,12 +58,12 @@ APK jest tworzone w `app/build/outputs/apk/debug/app-debug.apk`.
 - Odzyskanie ICE nie otwiera samoczynnie zminimalizowanego czatu/transferu. Wyjście z ekranu głównego podczas sesji chowa zadanie, zamiast niszczyć Activity.
 - Dodano testy polityki sesji, wysyłania, autoryzacji oraz testy interfejsu szkicu i ręcznej weryfikacji.
 
-Testy UI wymagają emulatora lub telefonu: `./gradlew.bat connectedDebugAndroidTest`. Nie zastępują rozmowy na dwóch fizycznych urządzeniach. Żywy czat nadal jest sesją w pamięci: ubity proces nie może odtworzyć jego treści.
+Testy UI wymagają emulatora lub telefonu: `./gradlew.bat connectedDebugAndroidTest`. Nie zastępują rozmowy na dwóch fizycznych urządzeniach. Uwaga historyczna dla 0.13.1: treść czatu była tylko w pamięci; od 0.14.0 jest lokalnie szyfrowana, zgodnie z opisem aktualnej architektury powyżej.
 
 ## Co nadal trzeba sprawdzić przed publicznym wydaniem
 
-- test na dwóch fizycznych telefonach: Wi-Fi, LTE/5G, przejście Wi-Fi ↔ LTE, Bluetooth oraz ekran blokady;
-- dostarczanie FCM po ubiciu aplikacji przez konkretnego producenta telefonu i po wyłączeniu optymalizacji baterii;
-- odbieranie, odrzucanie i anulowanie połączenia na ekranie blokady u różnych producentów Androida.
+- długie rozmowy, roaming, 5G, słaby zasięg oraz zestawy słuchawkowe Bluetooth; w 0.14.11 sprawdzono konkretną parę S23/Motorola, Wi-Fi/LTE, zmianę sieci i ekran przychodzącego, nie wszystkie warunki;
+- dostarczanie FCM po długim uśpieniu i przy różnych politykach oszczędzania baterii; w 0.14.11 potwierdzono także wybudzenie wideo na S23 po usunięciu procesu z pamięci;
+- odbieranie, odrzucanie i anulowanie na innych modelach oraz niezależny audyt bezpieczeństwa przed obietnicą najwyższego poziomu ochrony.
 
 Nie należy uruchamiać równocześnie starego katalogu `signaling-server/`; aktualna aplikacja korzysta z Cloudflare.
