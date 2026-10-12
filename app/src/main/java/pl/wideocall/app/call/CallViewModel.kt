@@ -569,7 +569,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
             if (!TelecomCallBridge.registerOutgoing(callId, contact.id, video = sessionKind == SignalMessage.SESSION_VIDEO)) {
                 _state.update { it.copy(diagnostic = "Android Telecom: system nie zarejestrował połączenia wychodzącego.") }
             }
-            runCatching { OngoingCallService.start(getApplication(), contact.name, callId) }
+            runCatching { OngoingCallService.start(getApplication(), contact.name, callId, video = sessionKind == SignalMessage.SESSION_VIDEO) }
                 .onFailure { error -> _state.update { it.copy(diagnostic = "Powiadomienie rozmowy: ${error.javaClass.simpleName}.") } }
             if (!outgoingRingback.start()) {
                 _state.update { it.copy(diagnostic = "Dźwięk dzwonienia: telefon nie udostępnił strumienia rozmowy.") }
@@ -1054,7 +1054,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
                 val remote = _state.value.remoteName ?: activeRemoteId
                 if (callId != null) TelecomCallBridge.activate(callId)
                 if (callId != null && remote != null) {
-                    runCatching { OngoingCallService.start(getApplication(), remote, callId) }
+                    runCatching { OngoingCallService.start(getApplication(), remote, callId, video = activeSessionKind == SignalMessage.SESSION_VIDEO) }
                         .onFailure { error -> _state.update { it.copy(diagnostic = "Powiadomienie rozmowy: ${error.javaClass.simpleName}.") } }
                 }
             }
@@ -1303,6 +1303,10 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
     private fun handleOffer(message: SignalMessage) {
         val from = message.from ?: return
         val callId = message.callId ?: return
+        if (activeCallId == callId && activeRemoteId == from) {
+            Log.i("WideocallCall", "duplicate_offer_ignored kind=${message.sessionKind}")
+            return
+        }
         if (message.sessionKind in setOf(SignalMessage.SESSION_VIDEO, SignalMessage.SESSION_AUDIO)) releaseChatTransport()
         if (_state.value.phase != CallPhase.READY) {
             if (activeCallId == null && _state.value.phase in setOf(CallPhase.CONNECTING_SERVER, CallPhase.SERVER_ERROR)) {
@@ -1368,7 +1372,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application),
             if (!TelecomCallBridge.registerIncoming(callId, contact?.name ?: from, video = message.sessionKind == SignalMessage.SESSION_VIDEO)) {
                 _state.update { it.copy(diagnostic = "Android Telecom: system nie zarejestrował połączenia przychodzącego.") }
             }
-            runCatching { CallNotifications.showIncoming(getApplication(), contact?.name ?: from, callId) }
+            runCatching { CallNotifications.showIncoming(getApplication(), contact?.name ?: from, callId, video = message.sessionKind == SignalMessage.SESSION_VIDEO) }
                 .onFailure { error -> _state.update { it.copy(diagnostic = "Powiadomienie przychodzące: ${error.javaClass.simpleName}.") } }
             startIncomingTimeout(message.callId)
         }

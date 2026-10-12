@@ -23,6 +23,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import pl.wideocall.app.call.CallScreenAwakePolicy
 import pl.wideocall.app.call.CallScreenController
 import androidx.core.net.toUri
@@ -144,6 +146,9 @@ import pl.wideocall.app.signaling.ContactPresence
 import pl.wideocall.app.ui.theme.WideocallTheme
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.launch
 
 private data class NotificationAction(
     val action: String,
@@ -160,11 +165,18 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        configureLockedScreen()
+        configureLockedScreen(intent?.action == CallNotifications.ACTION_SHOW_INCOMING)
         enableEdgeToEdge()
         refreshFullScreenIntentPermission()
         captureNotificationAction(intent)
         CallScreenController.bind(this, window, viewModel.state)
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                combine(viewModel.state, notificationAction) { state, action ->
+                    callNeedsLockScreen(state.phase, action?.action)
+                }.distinctUntilChanged().collect(::configureLockedScreen)
+            }
+        }
         setContent {
             WideocallTheme {
                 val action by notificationAction.collectAsState()
@@ -180,21 +192,28 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun configureLockedScreen() {
+    private fun configureLockedScreen(enabled: Boolean) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-            setShowWhenLocked(true)
-            setTurnScreenOn(true)
+            setShowWhenLocked(enabled)
+            setTurnScreenOn(enabled)
         }
         @Suppress("DEPRECATION")
-        window.addFlags(
-            WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
-                WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON,
-        )
+        val flags = WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+        if (enabled) window.addFlags(flags) else window.clearFlags(flags)
+    }
+
+    private fun callNeedsLockScreen(phase: CallPhase, action: String?): Boolean =
+        phase in setOf(CallPhase.INCOMING, CallPhase.OUTGOING, CallPhase.CONNECTING_CALL, CallPhase.IN_CALL) ||
+            action in setOf(CallNotifications.ACTION_SHOW_INCOMING, CallNotifications.ACTION_ANSWER,
+                CallNotifications.ACTION_TELECOM_ANSWER)
+
+    private fun applyCallLockScreen() {
+        configureLockedScreen(callNeedsLockScreen(viewModel.state.value.phase, notificationAction.value?.action))
     }
 
     override fun onResume() {
         super.onResume()
-        if (intent?.action == CallNotifications.ACTION_SHOW_INCOMING) configureLockedScreen()
+        applyCallLockScreen()
         refreshFullScreenIntentPermission()
         viewModel.onAppVisible()
         applyCallScreenAwake()
@@ -217,13 +236,13 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        if (intent.action == CallNotifications.ACTION_SHOW_INCOMING) configureLockedScreen()
         captureNotificationAction(intent)
+        applyCallLockScreen()
     }
 
     override fun onStart() {
         super.onStart()
-        if (intent?.action == CallNotifications.ACTION_SHOW_INCOMING) configureLockedScreen()
+        applyCallLockScreen()
         viewModel.refreshPreferences()
         viewModel.onAppVisible()
     }
@@ -423,10 +442,20 @@ private fun PermissionGate(
             }
         }
     }
-    LaunchedEffect(notificationAction?.callId, state.callId) {
+    LaunchedEffect(notificationAction, state.callId) {
         val action = notificationAction ?: return@LaunchedEffect
-        if (action.action == CallNotifications.ACTION_SHOW_INCOMING && action.callId != state.callId) {
-            delay(30_000L)
+        if (action.action in setOf(CallNotifications.ACTION_SHOW_INCOMING, CallNotifications.ACTION_ANSWER,
+                CallNotifications.ACTION_TELECOM_ANSWER, CallNotifications.ACTION_DECLINE,
+                CallNotifications.ACTION_TELECOM_DECLINE) && action.callId != state.callId) {
+            if (action.action == CallNotifications.ACTION_SHOW_INCOMING) {
+                repeat(140) {
+                    if (CallNotifications.isHandled(context, action.callId)) {
+                        consumeNotificationAction()
+                        return@LaunchedEffect
+                    }
+                    delay(250L)
+                }
+            } else delay(35_000L)
             if (viewModel.state.value.callId != action.callId) consumeNotificationAction()
         }
     }
@@ -441,7 +470,8 @@ private fun PermissionGate(
             }
         }
     }
-    if (notificationAction?.action == CallNotifications.ACTION_SHOW_INCOMING && notificationAction?.callId != state.callId) {
+    if (notificationAction?.action in setOf(CallNotifications.ACTION_SHOW_INCOMING, CallNotifications.ACTION_ANSWER,
+            CallNotifications.ACTION_TELECOM_ANSWER) && notificationAction?.callId != state.callId) {
         IncomingCallWaitingScreen(notificationAction?.callerId, notificationAction?.sessionKind == "audio")
     } else if (state.chatVisible && state.chatPeerId != null && state.phase in setOf(CallPhase.READY, CallPhase.SERVER_ERROR, CallPhase.CONNECTING_SERVER, CallPhase.CONNECTING_CHAT, CallPhase.IN_CHAT, CallPhase.IN_CALL)) {
         ChatScreen(state, viewModel)

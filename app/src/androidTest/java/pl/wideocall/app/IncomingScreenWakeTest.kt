@@ -14,6 +14,8 @@ class IncomingScreenWakeTest {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val incoming = Intent(context, MainActivity::class.java).apply {
             action = CallNotifications.ACTION_SHOW_INCOMING
+            putExtra(CallNotifications.EXTRA_CALL_ID, java.util.UUID.randomUUID().toString())
+            putExtra(CallNotifications.EXTRA_CALLER_ID, "TEST-TEST")
         }
         ActivityScenario.launch<MainActivity>(incoming).use { scenario ->
             scenario.onActivity { activity ->

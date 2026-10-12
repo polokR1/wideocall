@@ -66,6 +66,10 @@ object CallNotifications {
         return context.getSystemService(NotificationManager::class.java).canUseFullScreenIntent()
     }
 
+    fun isHandled(context: Context, callId: String): Boolean =
+        context.getSharedPreferences("handled_calls", Context.MODE_PRIVATE)
+            .getLong(callId, 0L) > System.currentTimeMillis()
+
     fun openFullScreenIntentSettings(context: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return
         val intent = Intent(
@@ -143,13 +147,13 @@ object CallNotifications {
             }
     }
 
-    fun ongoingNotification(context: Context, callerId: String, callId: String): android.app.Notification {
+    fun ongoingNotification(context: Context, callerId: String, callId: String, video: Boolean = true): android.app.Notification {
         createChannels(context)
         val person = Person.Builder().setName(callerId).setImportant(true).build()
         val hangUp = callIntent(context, ACTION_HANG_UP, callerId, callId, 30)
         return NotificationCompat.Builder(context, ONGOING_CHANNEL)
             .setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle("Trwa wideorozmowa")
+            .setContentTitle(if (video) "Trwa wideorozmowa" else "Trwa rozmowa głosowa")
             .setContentText(callerId)
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setOngoing(true)

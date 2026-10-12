@@ -2,7 +2,7 @@
 
 Prywatny komunikator 1:1 na Androida: rozmowy wideo i audio, osobny znikający czat oraz bezpośredni transfer plików. Nie wymaga konta, numeru telefonu ani logowania Google — każda instalacja ma własny identyfikator `XXXX-XXXX`.
 
-Aktualna wersja: **0.14.10 (29)**. Karty kontaktów, obsługa przychodzącej oferty podczas ponownego łączenia i ekran po otwarciu powiadomienia: [NAPRAWY-0.14.10.md](NAPRAWY-0.14.10.md). Rozmowy głosowe i ustawianie flag wybudzenia: [NAPRAWY-0.14.9.md](NAPRAWY-0.14.9.md). Ciche utrzymanie aktywnego czatu w tle i ponowne łączenie sygnalizacji po powrocie aplikacji: [NAPRAWY-0.14.8.md](NAPRAWY-0.14.8.md). Okno czatu niezależne od sesji i potwierdzenie zakończenia: [NAPRAWY-0.14.7.md](NAPRAWY-0.14.7.md). Dostarczenie a otwarcie czatu: [NAPRAWY-0.14.6.md](NAPRAWY-0.14.6.md). Zgodność audio na Motoroli: [NAPRAWY-0.14.5.md](NAPRAWY-0.14.5.md). Pozostałe zmiany prywatności i czatu: [NAPRAWY-0.14.4.md](NAPRAWY-0.14.4.md).
+Aktualna wersja: **0.14.11 (30)**. Naprawy audio, ekranu blokady, opóźnionych powiadomień oraz wyniki testów na S23 Ultra / Android 16 i Motoroli / Android 11: [NAPRAWY-0.14.11.md](NAPRAWY-0.14.11.md).
 
 ## Aktualna architektura
 

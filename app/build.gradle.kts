@@ -13,14 +13,9 @@ android {
         applicationId = "pl.wideocall.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 29
-        versionName = "0.14.10"
+        versionCode = 30
+        versionName = "0.14.11"
         buildConfigField("boolean", "FCM_ENABLED", "true")
-        buildConfigField(
-            "String",
-            "CALL_WAKE_URL",
-            "\"https://wideocall-notify.wideocall-polokr1.workers.dev/notify-call\"",
-        )
         buildConfigField(
             "String",
             "TURN_CREDENTIALS_URL",
@@ -43,6 +38,10 @@ android {
 
     buildTypes {
         release {
+            // Keep the installed signing identity so this local APK upgrades existing phones.
+            // Release disables debugging even though the certificate is the existing development certificate.
+            signingConfig = signingConfigs.getByName("debug")
+            isDebuggable = false
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
@@ -72,8 +71,7 @@ android {
 
 dependencies {
     val composeBom = platform("androidx.compose:compose-bom:2025.01.00")
-    // Nowsze BoM-y zawierają Auth z metadanymi Kotlin 2.3; 34.12.0 jest ostatnią
-    // sprawdzoną wersją zgodną z obecną linią Kotlin 2.1 tego projektu.
+    // Only Messaging is used: authentication and signaling are owned by Cloudflare.
     val firebaseBom = platform("com.google.firebase:firebase-bom:34.12.0")
     implementation(composeBom)
     androidTestImplementation(composeBom)
@@ -93,9 +91,6 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
 
-    implementation("com.google.firebase:firebase-auth")
-    implementation("com.google.firebase:firebase-appcheck-playintegrity")
-    implementation("com.google.firebase:firebase-database")
     implementation("com.google.firebase:firebase-messaging")
     implementation("io.github.webrtc-sdk:android:144.7559.15")
     implementation("com.squareup.okhttp3:okhttp:5.3.0")

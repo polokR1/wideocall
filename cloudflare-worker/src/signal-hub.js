@@ -4,7 +4,7 @@ const SIGNAL_TYPES = new Set([
   "accepted", "hangup", "reject", "busy",
   "contact-request", "contact-accept", "contact-reject", "contact-cancel",
 ]);
-const SESSION_KINDS = new Set(["video", "chat", "file", "contact"]);
+const SESSION_KINDS = new Set(["video", "audio", "chat", "file", "contact"]);
 const MAX_SIGNAL_BYTES = 220_000;
 const OFFER_TTL_MS = 45_000;
 const CALL_EVENT_TTL_MS = 2 * 60_000;

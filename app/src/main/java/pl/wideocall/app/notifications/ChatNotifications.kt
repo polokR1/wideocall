@@ -31,7 +31,12 @@ object ChatNotifications {
         )
     }
 
-    fun showInvitation(context: Context, callerId: String, sessionId: String) {
+    @Synchronized fun showInvitation(context: Context, callerId: String, sessionId: String) {
+        if (context.getSharedPreferences("handled_chat_invitations", Context.MODE_PRIVATE)
+                .getLong(sessionId, 0L) > System.currentTimeMillis()) {
+            Log.i("WideocallChat", "handled_invitation_suppressed")
+            return
+        }
         show(
             context = context,
             title = "Zaproszenie do szyfrowanego czatu",
@@ -52,8 +57,16 @@ object ChatNotifications {
         )
     }
 
-    fun cancel(context: Context, sessionId: String?) {
+    @Synchronized fun cancel(context: Context, sessionId: String?) {
         if (sessionId == null) return
+        if (!sessionId.startsWith("local:")) {
+            val handled = context.getSharedPreferences("handled_chat_invitations", Context.MODE_PRIVATE)
+            val now = System.currentTimeMillis()
+            handled.edit().apply {
+                handled.all.forEach { (key, value) -> if ((value as? Long ?: 0L) <= now) remove(key) }
+                putLong(sessionId, now + 120_000L)
+            }.apply()
+        }
         context.getSystemService(NotificationManager::class.java).cancel(notificationId(sessionId))
     }
 

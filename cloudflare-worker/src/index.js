@@ -187,7 +187,7 @@ export function validateCallRequest(body) {
   if (!USER_ID.test(body.callerId || "")) return "invalid_caller_id";
   if (!CALL_ID.test(body.callId || "")) return "invalid_call_id";
   if (!SIGNAL_ID.test(body.signalId || "")) return "invalid_signal_id";
-  if (!["video", "chat", "file"].includes(body.sessionKind || "video")) return "invalid_session_kind";
+  if (!["video", "audio", "chat", "file"].includes(body.sessionKind || "video")) return "invalid_session_kind";
   if (body.recipientId === body.callerId) return "cannot_call_self";
   return null;
 }

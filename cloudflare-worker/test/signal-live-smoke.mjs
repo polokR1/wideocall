@@ -162,6 +162,20 @@ assert.equal(forwarded.callId, callId);
 assert.equal(forwarded.from, senderId);
 assert.equal(forwarded.to, recipientId);
 
+const audioReceived = nextSignal(recipient, "Audio-session forwarding timed out");
+const audioCallId = "smoke-audio-123456";
+sender.send(JSON.stringify({
+  type: "signal",
+  signal: signSignal({
+    type: "offer", from: senderId, to: recipientId, callId: audioCallId,
+    sessionKind: "audio", sdp: "v=0", sdpType: "offer",
+  }, senderKey),
+}));
+const forwardedAudio = await audioReceived;
+await nextAcknowledgement(sender);
+assert.equal(forwardedAudio.callId, audioCallId);
+assert.equal(forwardedAudio.sessionKind, "audio");
+
 const fileReceived = nextSignal(recipient, "File-session forwarding timed out");
 const fileCallId = "smoke-file-123456";
 sender.send(JSON.stringify({
@@ -234,4 +248,4 @@ recipient.close();
 invited.close();
 cancelled.close();
 cancelledInvitation.close();
-console.log(JSON.stringify({ ok: true, authenticatedWebSockets: 5, signalForwarded: true, fileSignalForwarded: true, queuedInvitation: true, cancelledCallRemoved: true, cancelledInvitation: true }));
+console.log(JSON.stringify({ ok: true, authenticatedWebSockets: 5, signalForwarded: true, audioSignalForwarded: true, fileSignalForwarded: true, queuedInvitation: true, cancelledCallRemoved: true, cancelledInvitation: true }));

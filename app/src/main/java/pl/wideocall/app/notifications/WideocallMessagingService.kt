@@ -59,6 +59,10 @@ class WideocallMessagingService : FirebaseMessagingService() {
             "incoming_chat" -> ChatNotifications.showInvitation(this, callerId, callId)
             "incoming_file" -> FileTransferNotifications.showInvitation(this, callerId, callId)
             "incoming_call" -> if (!AppVisibility.isForeground) {
+                if (CallNotifications.isHandled(this, callId)) {
+                    Log.i("WideocallPush", "late_call_wake_suppressed")
+                    return
+                }
                 val video = data["sessionKind"] != SignalMessage.SESSION_AUDIO
                 TelecomCallBridge.registerIncoming(callId, callerId, video)
                 CallNotifications.showIncoming(this, callerId, callId, video)

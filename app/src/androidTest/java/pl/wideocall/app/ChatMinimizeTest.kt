@@ -21,6 +21,17 @@ import pl.wideocall.app.signaling.SignalMessage
 import java.util.UUID
 
 class ChatMinimizeTest {
+    @Test fun cancelledInvitationCannotReappearFromDelayedPush() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val manager = context.getSystemService(NotificationManager::class.java)
+        val session = UUID.randomUUID().toString()
+        val id = ((session.hashCode() and Int.MAX_VALUE) + 31_337) and Int.MAX_VALUE
+        ChatNotifications.cancel(context, session)
+        ChatNotifications.showInvitation(context, "Test", session)
+        Thread.sleep(300)
+        assertTrue(manager.activeNotifications.none { it.id == id })
+    }
+
     @Test fun returningToForegroundReconnectsWithoutCreatingAChatInvitation() {
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
             scenario.onActivity { activity ->

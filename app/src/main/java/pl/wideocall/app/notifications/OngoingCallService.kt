@@ -9,6 +9,7 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import androidx.core.content.ContextCompat
+import pl.wideocall.app.signaling.SignalMessage
 
 class OngoingCallService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
@@ -16,13 +17,14 @@ class OngoingCallService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val callerId = intent?.getStringExtra(CallNotifications.EXTRA_CALLER_ID) ?: return START_NOT_STICKY
         val callId = intent.getStringExtra(CallNotifications.EXTRA_CALL_ID) ?: return START_NOT_STICKY
-        val notification = CallNotifications.ongoingNotification(this, callerId, callId)
+        val video = intent.getStringExtra(CallNotifications.EXTRA_SESSION_KIND) != SignalMessage.SESSION_AUDIO
+        val notification = CallNotifications.ongoingNotification(this, callerId, callId, video)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             startForeground(
                 ONGOING_NOTIFICATION_ID,
                 notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL or
+                    (if (video) ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA else 0),
             )
         } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(ONGOING_NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL)
@@ -41,10 +43,11 @@ class OngoingCallService : Service() {
     companion object {
         private const val ONGOING_NOTIFICATION_ID = 7643
 
-        fun start(context: Context, callerId: String, callId: String) {
+        fun start(context: Context, callerId: String, callId: String, video: Boolean = true) {
             val intent = Intent(context, OngoingCallService::class.java).apply {
                 putExtra(CallNotifications.EXTRA_CALLER_ID, callerId)
                 putExtra(CallNotifications.EXTRA_CALL_ID, callId)
+                putExtra(CallNotifications.EXTRA_SESSION_KIND, if (video) SignalMessage.SESSION_VIDEO else SignalMessage.SESSION_AUDIO)
             }
             ContextCompat.startForegroundService(context, intent)
         }

@@ -35,3 +35,14 @@ test("maps direct file sessions to dedicated wake notifications", () => {
   assert.equal(fcmType(offer), "incoming_file");
   assert.equal(fcmType(hangup), "file_cancelled");
 });
+
+test("audio calls accept offer, answer, ICE and hangup with the correct wake types", () => {
+  const audio = { ...cancellation, type: "offer", sessionKind: "audio", sdp: "v=0", sdpType: "offer" };
+  for (const type of ["offer", "answer", "ice", "hangup"]) {
+    const signal = { ...audio, type, sdpType: type === "answer" ? "answer" : "offer", candidate: "candidate:test" };
+    assert.equal(validateSignal(signal, signal.from), true, `audio ${type} rejected`);
+  }
+  assert.equal(fcmType(audio), "incoming_call");
+  assert.equal(fcmType({ ...audio, type: "hangup" }), "call_cancelled");
+  assert.equal(validateSignal({ ...audio, sessionKind: "unknown" }, audio.from), false);
+});

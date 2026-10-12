@@ -251,7 +251,7 @@ object TelecomCallBridge {
                 Action.Activate -> {
                     // Answering already makes an incoming Telecom call active.
                     val activeResult = if (registration.mediaActive) null else setActive()
-                    if (activeResult !is CallControlResult.Error && !registration.userSelectedRoute) {
+                    if (activeResult !is CallControlResult.Error && !registration.userSelectedRoute && registration.video) {
                         registration.mediaActive = true
                         startAudioRouteChange(registration, speaker = true, revision = ++registration.routeRevision, automatic = true)
                     }

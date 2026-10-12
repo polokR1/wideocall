@@ -19,3 +19,6 @@ cloudflare-worker/.dev.vars
 cloudflare-worker/.wrangler
 *service-account*.json
 *firebase-adminsdk*.json
+*.jks
+*.keystore
+/diagnostics/

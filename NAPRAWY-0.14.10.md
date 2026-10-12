@@ -9,5 +9,5 @@
 
 - Kompilacja debug, lint i pełny zestaw instrumentacyjny (28 testów) zakończyły się powodzeniem na emulatorze.
 - Test fizycznego odbioru na telefonach nie został wykonany w tej wersji; ADB widział wyłącznie emulator.
-- Powiadomienie FCM musi zawierać `sessionKind=audio`, by poprawnie sklasyfikować rozmowę głosową na zablokowanym telefonie. Wymaga to wdrożenia zaktualizowanej funkcji Firebase z katalogu `functions` do właściwego projektu.
+- Korekta po audycie 0.14.11: aktywna ścieżka FCM jest obsługiwana przez Cloudflare, który już przekazuje `sessionKind`. Wdrażanie starej funkcji Firebase z katalogu `functions` nie jest potrzebne. Błąd polegał na odrzucaniu typu `audio` w walidatorze Cloudflare.
 - Wybudzenie i ekran przychodzącej rozmowy nadal wymagają weryfikacji z zablokowanym S23 po instalacji nowej wersji i wdrożeniu funkcji.
